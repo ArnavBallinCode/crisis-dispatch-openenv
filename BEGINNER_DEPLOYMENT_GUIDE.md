@@ -1,126 +1,173 @@
 # Beginner Guide: Crisis Dispatch OpenEnv Project
 
-This guide is written for someone who knows basic Python but is new to environment projects, deployment, and hackathon packaging.
+This guide explains the project as if you are new to environments and deployment.
+It is intentionally plain-English and step-by-step.
 
-## 1) What this project is
+## 1) What this project is, in simple words
 
-You built a simulation called **Crisis Resource Dispatch Environment**.
+You built a small "world" where emergency incidents happen and an agent chooses who to dispatch.
 
-Think of it as a training world where an AI agent learns to dispatch emergency units:
-- Ambulance
-- Fire truck
-- Police
+Resources:
+- ambulance
+- fire truck
+- police
 
-The agent must make decisions under constraints:
-- Limited units
-- Travel time (distance matters)
-- Different incident types need different units
-- Incidents can get worse over time
+Incident examples:
+- medical
+- fire
+- traffic
 
-The environment gives:
-- A **state** (what is happening now)
-- A way to take an **action** (dispatch a unit)
-- A **reward** signal (good or bad decision quality)
-- A final **score** (0.0 to 1.0)
+Why this is realistic:
+- units are limited
+- units have travel time
+- sending the wrong unit wastes time
+- incidents can worsen if you delay
 
----
+So the objective is not "one perfect action". It is a sequence of good tradeoffs.
 
-## 2) Project structure and what each file does
+## 2) Core concepts you should know
+
+- state
+  - current snapshot of city, units, incidents, and metrics.
+
+- action
+  - one dispatch decision per step.
+  - either send one unit to one incident, or wait.
+
+- reward
+  - immediate feedback each step.
+  - positive when you make progress, negative when you delay/mis-dispatch/fail incidents.
+
+- episode
+  - one full run of a task from reset until done.
+
+- score
+  - final deterministic quality score between 0.0 and 1.0.
+
+## 3) What each task actually means
+
+### easy task: Single Medical Priority
+
+What you see:
+- one critical medical incident
+- a few units available
+
+What good behavior looks like:
+- dispatch an ambulance quickly
+- avoid useless actions
+
+What this teaches:
+- action format
+- travel time impact
+- basic reward mechanics
+
+### medium task: Limited Fleet Prioritization
+
+What you see:
+- multiple incidents at once
+- incidents with different severities
+- too few units to do everything instantly
+
+What good behavior looks like:
+- respond to critical incidents first
+- avoid wrong unit dispatch
+- choose where each unit gives most value
+
+What this teaches:
+- prioritization under constraints
+- managing opportunity cost
+
+### hard task: Multi-Agency Incident Cascade
+
+What you see:
+- several incidents with conflicting urgency
+- some incidents require multiple unit types
+- if you delay, problems cascade
+
+What good behavior looks like:
+- coordinate unit types, not just nearest unit
+- resolve critical incidents before they fail
+- avoid locking key units in low-value routes
+
+What this teaches:
+- real tradeoff reasoning
+- non-greedy multi-step planning
+
+## 4) How scoring works (plain explanation)
+
+Final score combines:
+- weighted success
+  - resolving critical incidents matters more than low severity incidents.
+- weighted timeliness
+  - faster response earns more.
+- dispatch accuracy
+  - fewer wrong dispatches improves score.
+- critical failure penalty
+  - unresolved critical incidents heavily reduce score.
+
+This is deterministic, so same policy + same task => same final score.
+
+## 5) Project files and why they exist
 
 ```text
 crisis-dispatch-env/
-├── BEGINNER_DEPLOYMENT_GUIDE.md
+├── .env.example
+├── .gitignore
 ├── Dockerfile
+├── BEGINNER_DEPLOYMENT_GUIDE.md
 ├── README.md
 ├── inference.py
 ├── openenv.yaml
 ├── requirements.txt
 └── app/
-    ├── __init__.py
     ├── environment.py
     ├── main.py
     ├── models.py
     └── tasks.py
 ```
 
-### Root files
+Key files:
+- app/models.py
+  - data contracts (actions, state, score output)
+- app/tasks.py
+  - easy/medium/hard task definitions and deterministic grader
+- app/environment.py
+  - reset, step, state mechanics
+- app/main.py
+  - FastAPI routes for interacting with environment
+- inference.py
+  - baseline policies and reproducibility checks
+- openenv.yaml
+  - OpenEnv metadata and contract declaration
+- .env.example
+  - safe template of local environment variables
 
-- `requirements.txt`
-  - Python dependencies.
-  - Install these before running the project.
+## 6) Environment variables (.env) explained
 
-- `Dockerfile`
-  - Defines how to build a container image.
-  - Needed for consistent runtime and Hugging Face Docker Spaces.
+This project supports loading variables from a local `.env` file.
 
-- `openenv.yaml`
-  - Metadata/config for OpenEnv.
-  - Declares task ids, models, interface methods, grader function, and runtime hints.
+Create your local file from template:
 
-- `inference.py`
-  - Runs baseline policies (heuristic/random/openai).
-  - Produces reproducible scores for easy/medium/hard tasks.
+```bash
+cp .env.example .env
+```
 
-- `README.md`
-  - Technical project documentation for judges and collaborators.
+Variables used:
+- PORT
+  - server port, default 7860 in Docker context.
+- OPENAI_API_KEY
+  - only needed for `inference.py --mode openai`.
+- OPENAI_MODEL
+  - optional model name for your own wrappers/scripts.
+- HF_SPACE_ID
+  - helper metadata value for documentation/workflow.
 
-- `BEGINNER_DEPLOYMENT_GUIDE.md` (this file)
-  - Beginner-first setup and deployment checklist.
+Important safety rule:
+- never commit real tokens into git.
 
-### app folder
+## 7) Local run: exact sequence
 
-- `app/models.py`
-  - Typed Pydantic models for actions, units, incidents, environment state, and score output.
-
-- `app/tasks.py`
-  - Three tasks (easy/medium/hard).
-  - Severity weights and deterministic grading logic.
-
-- `app/environment.py`
-  - Core simulator logic:
-    - `reset()`
-    - `step(action)`
-    - `state()`
-  - Handles travel, penalties, escalation, resolution, and episode termination.
-
-- `app/main.py`
-  - FastAPI server and endpoints:
-    - `GET /health`
-    - `GET /tasks`
-    - `POST /reset`
-    - `POST /reset/{task_id}`
-    - `POST /step`
-    - `GET /state`
-    - `GET /score`
-
----
-
-## 3) How the environment works (simple mental model)
-
-### Step-by-step loop
-
-1. You call `reset(task_id)` to start a scenario.
-2. You get a state containing units + incidents.
-3. You pick an action (dispatch unit X to incident Y, or wait).
-4. `step(action)` updates the world by one tick:
-   - unit moves closer
-   - incident waits/escalates
-   - rewards/penalties are applied
-5. Repeat until done.
-6. Read final score from `GET /score` or grader output.
-
-### Why score can be low
-
-- Wrong unit sent
-- High-severity incident delayed
-- Critical incident unresolved
-- Too many steps with waiting/escalation
-
----
-
-## 4) Local setup (exact commands)
-
-Run from the project root:
+From project root:
 
 ```bash
 cd /Users/arnavangarkar/Desktop/crisis-dispatch-openenv/crisis-dispatch-env
@@ -132,13 +179,13 @@ Install dependencies:
 /usr/bin/python3 -m pip install -r requirements.txt
 ```
 
-Start API server:
+Start API (this command avoids module path errors):
 
 ```bash
 /usr/bin/python3 -m uvicorn app.main:app --app-dir /Users/arnavangarkar/Desktop/crisis-dispatch-openenv/crisis-dispatch-env --host 127.0.0.1 --port 8011
 ```
 
-In a second terminal, smoke test:
+In another terminal, smoke test:
 
 ```bash
 curl -s http://127.0.0.1:8011/health
@@ -149,31 +196,27 @@ curl -s http://127.0.0.1:8011/state
 curl -s http://127.0.0.1:8011/score
 ```
 
----
+## 8) Baseline inference runs
 
-## 5) Baseline inference (reproducible)
-
-Heuristic baseline + determinism check:
+Deterministic heuristic baseline:
 
 ```bash
-/usr/bin/python3 /Users/arnavangarkar/Desktop/crisis-dispatch-openenv/crisis-dispatch-env/inference.py --mode heuristic --task all --check-determinism
+/usr/bin/python3 inference.py --mode heuristic --task all --check-determinism
 ```
 
-Random baseline (seeded):
+Seeded random baseline:
 
 ```bash
-/usr/bin/python3 /Users/arnavangarkar/Desktop/crisis-dispatch-openenv/crisis-dispatch-env/inference.py --mode random --task all --episodes 1 --seed 2026
+/usr/bin/python3 inference.py --mode random --task all --episodes 1 --seed 2026
 ```
 
-OpenAI policy:
+OpenAI mode (needs OPENAI_API_KEY in env):
 
 ```bash
-OPENAI_API_KEY=your_key_here /usr/bin/python3 /Users/arnavangarkar/Desktop/crisis-dispatch-openenv/crisis-dispatch-env/inference.py --mode openai --task hard --model gpt-4.1-mini
+/usr/bin/python3 inference.py --mode openai --task hard --model gpt-4.1-mini
 ```
 
----
-
-## 6) Docker workflow
+## 9) Docker: what to do and what to expect
 
 Build image:
 
@@ -187,64 +230,22 @@ Run container:
 docker run --rm -p 7860:7860 crisis-dispatch-env
 ```
 
-Test container API:
+Check it is live:
 
 ```bash
 curl -s http://127.0.0.1:7860/health
 ```
 
-If Docker command fails with daemon/socket error, start Docker Desktop or OrbStack first, then retry.
+If Docker fails with daemon/socket errors, start Docker Desktop or OrbStack and rerun.
 
----
+## 10) Hugging Face Spaces: exact flow for your Space
 
-## 7) Hugging Face Spaces deployment (exact beginner flow)
+Your Space:
+- blackmamba2408/Crisis-Dispatch-OpenEnv
 
-### Step A: Prepare repository
+Your current remote is already configured as `hf`.
 
-Make sure these files are present at repo root:
-- `Dockerfile`
-- `requirements.txt`
-- `openenv.yaml`
-- `app/` folder
-
-### Step B: Create Space
-
-1. Go to Hugging Face.
-2. Click **New Space**.
-3. Choose:
-   - SDK: **Docker**
-   - Visibility: public/private (your choice)
-4. Create the Space.
-
-### Step C: Push code to the Space repo
-
-In your local project:
-
-```bash
-git remote add hf https://huggingface.co/spaces/<username>/<space-name>
-git push hf main
-```
-
-If your default branch is `master`, use that instead of `main`.
-
-### Step D: Wait for build logs
-
-Hugging Face will build the Docker image automatically.
-- If build fails, open build logs and fix dependency/runtime issues.
-- If build succeeds, app URL becomes live.
-
-### Step E: Verify live endpoints
-
-Use your Space URL:
-
-```bash
-curl -s https://<username>-<space-name>.hf.space/health
-curl -s https://<username>-<space-name>.hf.space/tasks
-```
-
-### Your exact Space commands
-
-Use these exact values for your Space:
+Optional (clone/check):
 
 ```bash
 git clone https://huggingface.co/spaces/blackmamba2408/Crisis-Dispatch-OpenEnv
@@ -252,92 +253,58 @@ curl -LsSf https://hf.co/cli/install.sh | bash
 hf download blackmamba2408/Crisis-Dispatch-OpenEnv --repo-type=space
 ```
 
-From this project folder, connect and push:
+Push current project to Space:
 
 ```bash
-git remote add hf https://huggingface.co/spaces/blackmamba2408/Crisis-Dispatch-OpenEnv
+git remote -v
 git push hf main
 ```
 
-When asked for password, use your Hugging Face access token (write permissions required):
-- https://huggingface.co/settings/tokens
-
----
-
-## 8) Hackathon submission checklist
-
-- [ ] `reset()`, `step(action)`, `state()` implemented
-- [ ] typed Pydantic models implemented
-- [ ] `openenv.yaml` included
-- [ ] easy/medium/hard tasks included
-- [ ] deterministic grader outputs 0.0-1.0
-- [ ] dense reward function included
-- [ ] `inference.py` with OpenAI client included
-- [ ] baseline scores documented and reproducible
-- [ ] Docker build works
-- [ ] Hugging Face Space deployed and reachable
-
----
-
-## 9) Git workflow to finalize and push
-
-Check status:
+After push:
+1. Open the Space page.
+2. Watch build logs.
+3. Wait until build is green.
+4. Test endpoint:
 
 ```bash
-git status
+curl -s https://blackmamba2408-Crisis-Dispatch-OpenEnv.hf.space/health
 ```
 
-Stage everything:
+## 11) Common errors and direct fixes
 
-```bash
-git add .
-```
+### Error: ModuleNotFoundError: No module named app
 
-Commit:
+Reason:
+- you started uvicorn from outside project root without app-dir.
 
-```bash
-git commit -m "Add beginner deployment guide and validate crisis dispatch environment"
-```
+Fix:
+- use `--app-dir /absolute/path/to/crisis-dispatch-env`.
 
-Push:
+### Error: push rejected to hf
 
-```bash
-git push origin main
-```
+Reason:
+- auth token missing/invalid, or wrong account permissions.
 
-If your branch is `master`, use:
+Fix:
+1. Run `hf auth login`.
+2. Confirm token has write scope.
+3. Retry `git push hf main`.
 
-```bash
-git push origin master
-```
+### Error: openai mode fails
 
----
+Reason:
+- `OPENAI_API_KEY` is not set.
 
-## 10) Common problems and fixes
+Fix:
+- add it to `.env` or export in shell.
 
-### Problem: `ModuleNotFoundError: No module named app`
-Use `--app-dir` with absolute path in uvicorn command.
+## 12) Final checklist before submission
 
-### Problem: Docker daemon connection error
-Start Docker Desktop or OrbStack and rerun `docker build`.
+- [ ] local API responds on health/tasks/reset/step/state/score
+- [ ] heuristic determinism check passes
+- [ ] Docker image builds and runs
+- [ ] Space build succeeds on Hugging Face
+- [ ] score and task explanation included in README
+- [ ] no secrets committed
 
-### Problem: OpenAI mode fails
-Set `OPENAI_API_KEY` in your shell before running inference.
-
-### Problem: zero score on hard task
-This can happen with weak policies; compare heuristic vs random and inspect dispatch choices.
-
----
-
-## 11) What to do next (recommended order)
-
-1. Run local API checks.
-2. Run heuristic and random baselines.
-3. Build Docker image locally.
-4. Push to GitHub.
-5. Create Hugging Face Docker Space.
-6. Push code to Space repo.
-7. Validate Space endpoints.
-8. Submit with links + scores + explanation of design choices.
-
-You now have a complete, practical environment pipeline from local dev to cloud deployment.
+If you complete this checklist, your environment is in strong hackathon submission shape.

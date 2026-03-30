@@ -12,18 +12,62 @@ pinned: false
 
 A production-style OpenEnv environment that simulates emergency response dispatch across a grid city.
 
-This environment is designed for hackathon judging criteria:
-- Real-world utility: constrained, multi-agency emergency operations.
-- Task depth: easy, medium, hard scenarios with escalating coordination difficulty.
-- Deterministic, interpretable grading in the range 0.0-1.0.
-- Dense reward shaping for policy learning and rapid feedback.
-- Docker-ready deployment with HuggingFace Spaces compatibility.
+This project is designed for hackathon-quality evaluation:
+- Real-world utility: multi-agency response with limited resources.
+- Three difficulties: easy, medium, hard.
+- Deterministic grading in [0.0, 1.0].
+- Dense reward shaping for training and evaluation.
+- Docker and Hugging Face Spaces readiness.
+
+## Documentation Map
+
+- Start here for full beginner explanation:
+  - `BEGINNER_DEPLOYMENT_GUIDE.md`
+- OpenEnv and project summary:
+  - `README.md` (this file)
+- Environment contract details:
+  - `openenv.yaml`
+
+## Quick Start (Local)
+
+1. Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+2. Prepare environment file:
+
+```bash
+cp .env.example .env
+```
+
+3. Start API server:
+
+```bash
+uvicorn app.main:app --app-dir . --host 0.0.0.0 --port 7860
+```
+
+4. Test basic endpoint:
+
+```bash
+curl -s http://127.0.0.1:7860/health
+```
+
+5. Run deterministic baseline:
+
+```bash
+python inference.py --mode heuristic --task all --check-determinism
+```
 
 ## Project Layout
 
 ```text
 crisis-dispatch-env/
+├── .dockerignore
+├── .env.example
 ├── Dockerfile
+├── BEGINNER_DEPLOYMENT_GUIDE.md
 ├── README.md
 ├── inference.py
 ├── openenv.yaml
@@ -75,6 +119,23 @@ Each incident includes:
 - Incident escalation increases downstream penalties.
 - Timeout closes unresolved incidents with extra penalty.
 
+## Task Difficulty Design
+
+- easy
+  - One critical medical incident.
+  - One correct unit type is enough.
+  - Teaches action format and travel-time effect.
+
+- medium
+  - Multiple incidents at once.
+  - Limited unit pool.
+  - Requires prioritization and avoiding wrong dispatches.
+
+- hard
+  - Multi-agency incidents with conflicting priorities.
+  - Tradeoff pressure: severity vs distance vs resource lock-up.
+  - Includes cascade risk if critical events are delayed.
+
 ## Reward Function (Dense)
 
 Per-step reward includes:
@@ -97,12 +158,6 @@ Final score is in `[0.0, 1.0]` and combines:
 
 The grader is deterministic and implemented in `app/tasks.py` (`grade_episode`).
 
-## Tasks
-
-- `easy`: single critical medical call with one correct responder type.
-- `medium`: multiple concurrent incidents with limited units and prioritization pressure.
-- `hard`: multi-agency incidents with conflicting priorities and distance/severity tradeoffs.
-
 ## API Endpoints
 
 - `GET /health`
@@ -113,27 +168,14 @@ The grader is deterministic and implemented in `app/tasks.py` (`grade_episode`).
 - `GET /state`
 - `GET /score`
 
-## Local Run
-
-### 1) Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 2) Start server
-
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 7860
-```
-
-### 3) Example interaction
+## Example API Interaction
 
 ```bash
 curl -s http://localhost:7860/reset/easy
 curl -s http://localhost:7860/step \
   -H 'Content-Type: application/json' \
   -d '{"unit_id":"A1","incident_id":"E-MED-1"}'
+curl -s http://localhost:7860/state
 curl -s http://localhost:7860/score
 ```
 
@@ -143,6 +185,10 @@ curl -s http://localhost:7860/score
 - `heuristic` policy (deterministic baseline)
 - `random` policy (seeded baseline)
 - `openai` policy using the OpenAI client
+
+Environment notes:
+- If `OPENAI_API_KEY` is present in `.env`, openai mode can run without exporting each time.
+- `OPENAI_MODEL` in `.env` can be used as your default model choice in your own wrappers.
 
 Run baseline:
 
@@ -190,11 +236,18 @@ Run:
 docker run --rm -p 7860:7860 crisis-dispatch-env
 ```
 
+If you see daemon/socket errors, start Docker Desktop or OrbStack first.
+
 ## HuggingFace Spaces Deployment
 
 This repository is Docker-compatible for Spaces:
 - `Dockerfile` launches `uvicorn app.main:app` on `${PORT:-7860}`.
 - `openenv.yaml` includes Spaces runtime hints.
+
+### Your Space
+
+- Space repo: `https://huggingface.co/spaces/blackmamba2408/Crisis-Dispatch-OpenEnv`
+- Public app URL pattern: `https://blackmamba2408-Crisis-Dispatch-OpenEnv.hf.space`
 
 In a Docker Space:
 1. Push this folder contents.
@@ -235,6 +288,8 @@ git push hf main
 ```
 
 When prompted for password/credential, use a Hugging Face access token with write permission.
+
+If already logged in with `hf auth login`, git push should reuse stored credentials.
 
 ## Reproducibility Notes
 

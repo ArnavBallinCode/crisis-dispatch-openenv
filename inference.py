@@ -5,12 +5,22 @@ import json
 import os
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, List, Optional
 
 from openai import OpenAI
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover
+    load_dotenv = None
+
 from app.environment import CrisisDispatchEnvironment
 from app.models import DispatchAction, EnvironmentState, Severity
+
+
+if load_dotenv is not None:
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
 
 
 SEVERITY_PRIORITY = {

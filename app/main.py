@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover
+    load_dotenv = None
+
 from app.environment import CrisisDispatchEnvironment
 from app.models import DispatchAction, EnvironmentState, ResetRequest, ScoreResponse, StepResult, TaskSummary
 from app.tasks import list_task_summaries
+
+
+if load_dotenv is not None:
+    # Load local development variables from project root if present.
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env", override=False)
 
 
 app = FastAPI(
