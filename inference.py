@@ -6,7 +6,7 @@ import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from openai import OpenAI
 
@@ -28,6 +28,41 @@ SEVERITY_PRIORITY = {
     Severity.MEDIUM: 2.0,
     Severity.CRITICAL: 3.5,
 }
+
+
+def _env_first(*keys: str) -> Optional[str]:
+    for key in keys:
+        value = os.getenv(key)
+        if value is None:
+            continue
+        cleaned = value.strip().strip('"').strip("'")
+        if cleaned:
+            return cleaned
+    return None
+
+
+def resolve_llm_config(model_arg: Optional[str]) -> Tuple[str, str, Optional[str]]:
+    """Resolve API key/model/base URL for OpenAI-compatible providers.
+
+    Supported env var aliases:
+    - API key: OPENAI_API_KEY, API_KEY, GROQ_API_KEY
+    - Base URL: OPENAI_BASE_URL, API_BASE_URL, GROQ_BASE_URL
+    - Model: OPENAI_MODEL, MODEL_NAME, GROQ_MODEL
+    """
+    api_key = _env_first("OPENAI_API_KEY", "API_KEY", "GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Missing API key for --mode openai. Set OPENAI_API_KEY or API_KEY (or GROQ_API_KEY)."
+        )
+
+    resolved_model = (
+        model_arg.strip()
+        if model_arg and model_arg.strip()
+        else _env_first("OPENAI_MODEL", "MODEL_NAME", "GROQ_MODEL")
+        or "gpt-4.1-mini"
+    )
+    base_url = _env_first("OPENAI_BASE_URL", "API_BASE_URL", "GROQ_BASE_URL")
+    return api_key, resolved_model, base_url
 
 
 @dataclass
@@ -153,22 +188,39 @@ def llm_policy(state: EnvironmentState, client: OpenAI, model: str) -> DispatchA
         ],
     }
 
-    response = client.responses.create(
-        model=model,
-        temperature=0,
-        input=[
-            {
-                "role": "system",
-                "content": (
-                    "You dispatch emergency units. Return only JSON with keys unit_id and "
-                    "incident_id. Use null for both keys to wait."
-                ),
-            },
-            {"role": "user", "content": json.dumps(prompt_payload)},
-        ],
+    system_prompt = (
+        "You dispatch emergency units. Return only JSON with keys unit_id and "
+        "incident_id. Use null for both keys to wait."
     )
+    user_prompt = json.dumps(prompt_payload)
 
-    text = response.output_text.strip()
+    if hasattr(client, "responses"):
+        response = client.responses.create(
+            model=model,
+            temperature=0,
+            input=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        text = (getattr(response, "output_text", None) or "").strip()
+    else:
+        completion = client.chat.completions.create(
+            model=model,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        text = (
+            completion.choices[0].message.content.strip()
+            if completion.choices and completion.choices[0].message.content
+            else ""
+        )
+
+    if not text:
+        return heuristic_policy(state)
     try:
         payload = json.loads(text)
         return DispatchAction(
@@ -207,7 +259,7 @@ def run_baseline(
     tasks: List[str],
     episodes: int,
     seed: int,
-    model: str,
+    model: Optional[str],
 ) -> List[EpisodeResult]:
     results: List[EpisodeResult] = []
 
@@ -219,10 +271,14 @@ def run_baseline(
                 rng = random.Random(seed + episode_idx)
                 policy = lambda state, _rng=rng: random_policy(state, _rng)
             elif mode == "openai":
-                if not os.getenv("OPENAI_API_KEY"):
-                    raise RuntimeError("OPENAI_API_KEY is required for --mode openai")
-                client = OpenAI()
-                policy = lambda state, _client=client: llm_policy(state, _client, model)
+                api_key, resolved_model, base_url = resolve_llm_config(model)
+                client_kwargs = {"api_key": api_key}
+                if base_url:
+                    client_kwargs["base_url"] = base_url
+                client = OpenAI(**client_kwargs)
+                policy = lambda state, _client=client, _model=resolved_model: llm_policy(
+                    state, _client, _model
+                )
             else:
                 raise ValueError(f"Unknown mode: {mode}")
 
@@ -281,8 +337,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default="gpt-4.1-mini",
-        help="OpenAI model used in --mode openai",
+        default=None,
+        help=(
+            "Model used in --mode openai. If omitted, uses OPENAI_MODEL/MODEL_NAME/GROQ_MODEL "
+            "or falls back to gpt-4.1-mini."
+        ),
     )
     parser.add_argument(
         "--check-determinism",
