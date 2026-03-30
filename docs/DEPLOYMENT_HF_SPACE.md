@@ -16,6 +16,10 @@ At repo root:
 - `openenv.yaml`
 - `README.md`
 
+Important:
+- `README.md` must include valid Hugging Face YAML frontmatter (sdk/app_port etc.).
+- If missing, Space enters `CONFIG_ERROR` with `Missing configuration in README`.
+
 ## 3) Preferred deploy flow
 
 ### Option A: git push (normal)
