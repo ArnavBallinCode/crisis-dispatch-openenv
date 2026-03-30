@@ -242,6 +242,26 @@ curl -s https://<username>-<space-name>.hf.space/health
 curl -s https://<username>-<space-name>.hf.space/tasks
 ```
 
+### Your exact Space commands
+
+Use these exact values for your Space:
+
+```bash
+git clone https://huggingface.co/spaces/blackmamba2408/Crisis-Dispatch-OpenEnv
+curl -LsSf https://hf.co/cli/install.sh | bash
+hf download blackmamba2408/Crisis-Dispatch-OpenEnv --repo-type=space
+```
+
+From this project folder, connect and push:
+
+```bash
+git remote add hf https://huggingface.co/spaces/blackmamba2408/Crisis-Dispatch-OpenEnv
+git push hf main
+```
+
+When asked for password, use your Hugging Face access token (write permissions required):
+- https://huggingface.co/settings/tokens
+
 ---
 
 ## 8) Hackathon submission checklist

@@ -1,3 +1,13 @@
+---
+title: Crisis Dispatch OpenEnv
+emoji: "🚑"
+colorFrom: red
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Crisis Resource Dispatch Environment
 
 A production-style OpenEnv environment that simulates emergency response dispatch across a grid city.
@@ -190,6 +200,41 @@ In a Docker Space:
 1. Push this folder contents.
 2. Ensure Space SDK is set to Docker.
 3. Launch and use the exposed app URL.
+
+### Exact commands for your Space
+
+Your Space repo is:
+
+```bash
+https://huggingface.co/spaces/blackmamba2408/Crisis-Dispatch-OpenEnv
+```
+
+Clone the Space repo:
+
+```bash
+git clone https://huggingface.co/spaces/blackmamba2408/Crisis-Dispatch-OpenEnv
+```
+
+Install the Hugging Face CLI:
+
+```bash
+curl -LsSf https://hf.co/cli/install.sh | bash
+```
+
+Optional download check:
+
+```bash
+hf download blackmamba2408/Crisis-Dispatch-OpenEnv --repo-type=space
+```
+
+Push this project to your Space directly from this repository:
+
+```bash
+git remote add hf https://huggingface.co/spaces/blackmamba2408/Crisis-Dispatch-OpenEnv
+git push hf main
+```
+
+When prompted for password/credential, use a Hugging Face access token with write permission.
 
 ## Reproducibility Notes
 
