@@ -1,3 +1,13 @@
+---
+title: Crisis Dispatch OpenEnv
+emoji: 🚑
+colorFrom: red
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Crisis Resource Dispatch Environment
 
 A deterministic OpenEnv environment for crisis resource dispatch.
