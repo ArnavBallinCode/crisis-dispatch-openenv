@@ -1,0 +1,51 @@
+name: crisis-dispatch-env
+version: 1.0.0
+description: Deterministic crisis resource dispatch environment for emergency response planning.
+
+entrypoint:
+  module: app.main
+  app: app
+
+environment:
+  class: app.environment:CrisisDispatchEnvironment
+  interface:
+    - reset()
+    - step(action)
+    - state()
+
+action_model: app.models:DispatchAction
+observation_model: app.models:EnvironmentState
+step_result_model: app.models:StepResult
+
+tasks:
+  - id: easy
+    difficulty: easy
+    description: Single incident with one correct resource type.
+  - id: medium
+    difficulty: medium
+    description: Multiple incidents with limited unit capacity and prioritization pressure.
+  - id: hard
+    difficulty: hard
+    description: Multi-agency conflicts requiring tradeoffs across severity, distance, and timing.
+
+grader:
+  type: deterministic
+  function: app.tasks:grade_episode
+  score_range: [0.0, 1.0]
+
+reward:
+  dense: true
+  notes:
+    - Positive reward for valid dispatch and incident resolution.
+    - Penalties for wrong dispatches, waiting, escalation, and unresolved incidents.
+
+inference:
+  script: inference.py
+
+runtime:
+  dockerfile: Dockerfile
+  python: "3.11"
+
+hf_spaces:
+  sdk: docker
+  app_port: 7860
