@@ -46,6 +46,13 @@ Run deterministic baseline:
 python inference.py --mode heuristic --task all --check-determinism
 ```
 
+Run tests:
+
+```bash
+pip install pytest
+pytest -q
+```
+
 Run OpenAI-compatible provider baseline (OpenAI or Groq endpoint):
 
 ```bash
@@ -63,6 +70,32 @@ docker run --rm -p 7860:7860 crisis-dispatch-env
 
 - Repo: `https://huggingface.co/spaces/blackmamba2408/Crisis-Dispatch-OpenEnv`
 - Host: `https://blackmamba2408-crisis-dispatch-openenv.hf.space`
+
+## CI + Auto Sync Pipeline
+
+This repository now includes a GitHub Actions workflow at
+`.github/workflows/ci-hf-sync.yml`.
+
+Pipeline behavior:
+
+1. Runs on pull requests to `main`, pushes to `main`, and manual `workflow_dispatch`.
+2. Installs dependencies and runs `pytest -q`.
+3. Runs a deterministic baseline check:
+   `python inference.py --mode heuristic --task all --check-determinism`.
+4. If tests pass on `main`, pushes the latest commit to your Hugging Face Space.
+
+Required GitHub repository secrets:
+
+- `HF_TOKEN`: Hugging Face token with write access to the target Space.
+- `HF_SPACE_ID`: Space id in `owner/space-name` format.
+  Example: `blackmamba2408/Crisis-Dispatch-OpenEnv`.
+
+Notes:
+
+- The sync job is blocked unless test checks pass.
+- Pull requests run validation only (no Space sync).
+- Deployment uses git push to Hugging Face so the Space reflects the latest
+  repository state.
 
 ## Project Layout
 
