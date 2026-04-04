@@ -87,11 +87,138 @@ def travel_distance(unit_x: int, unit_y: int, incident_x: int, incident_y: int) 
     return abs(unit_x - incident_x) + abs(unit_y - incident_y)
 
 
+# def heuristic_policy(state: EnvironmentState) -> DispatchAction:
+#     incidents = active_incidents(state)
+#     units = available_units(state)
+#     if not incidents or not units:
+#         return DispatchAction()
+
+#     best_score = float("-inf")
+#     best_action = DispatchAction()
+
+#     for incident in incidents:
+#         required = set(incident.required_units)
+#         responding = set(incident.responding_units)
+#         missing = required - responding
+#         urgency = incident.elapsed / max(1, incident.max_wait)
+#         severity_score = SEVERITY_PRIORITY[incident.severity]
+#         first_response_bonus = 1.0 if incident.first_response_step is None else 0.0
+
+#         for unit in units:
+#             distance = travel_distance(
+#                 unit.position.x,
+#                 unit.position.y,
+#                 incident.position.x,
+#                 incident.position.y,
+#             )
+
+#             if unit.unit_type in missing:
+#                 suitability = 1.6
+#             elif unit.unit_type in required:
+#                 suitability = -0.8
+#             else:
+#                 suitability = -2.0
+
+#             slack = incident.max_wait - incident.elapsed - distance
+#             if slack <= 0:
+#                 deadline_pressure = 1.6
+#             else:
+#                 deadline_pressure = 1.0 / (1.0 + slack)
+
+#             pair_score = (
+#                 3.4 * severity_score
+#                 + 2.2 * suitability
+#                 + 1.8 * deadline_pressure
+#                 + 1.4 * urgency
+#                 + 1.8 * first_response_bonus
+#                 - 0.25 * distance
+#             )
+
+#             if pair_score > best_score:
+#                 best_score = pair_score
+#                 best_action = DispatchAction(unit_id=unit.id, incident_id=incident.id)
+
+#     return best_action
+
 def heuristic_policy(state: EnvironmentState) -> DispatchAction:
     incidents = active_incidents(state)
     units = available_units(state)
+
     if not incidents or not units:
         return DispatchAction()
+
+    incident_lookup = {incident.id: incident for incident in state.incidents}
+
+    def min_eta_for_type(unit_type, incident) -> int:
+        best = 10**9
+        for unit in state.units:
+            if unit.unit_type != unit_type:
+                continue
+
+            if unit.status.value == "available":
+                eta = travel_distance(
+                    unit.position.x,
+                    unit.position.y,
+                    incident.position.x,
+                    incident.position.y,
+                )
+            else:
+                target = incident_lookup.get(unit.target_incident_id or "")
+                if target is None:
+                    continue
+                eta = unit.travel_remaining + 1 + travel_distance(
+                    target.position.x,
+                    target.position.y,
+                    incident.position.x,
+                    incident.position.y,
+                )
+
+            if eta < best:
+                best = eta
+        return best
+
+    forced_candidates = []
+    for incident in incidents:
+        if incident.severity != Severity.CRITICAL:
+            continue
+
+        required = set(incident.required_units)
+        responding = set(incident.responding_units)
+        missing = required - responding
+        if not missing:
+            continue
+
+        time_left = incident.max_wait - incident.elapsed
+        for needed_type in missing:
+            feasible_units = [
+                unit
+                for unit in units
+                if unit.unit_type == needed_type
+                and travel_distance(
+                    unit.position.x,
+                    unit.position.y,
+                    incident.position.x,
+                    incident.position.y,
+                )
+                <= time_left
+            ]
+
+            if len(feasible_units) == 1:
+                chosen = feasible_units[0]
+                distance = travel_distance(
+                    chosen.position.x,
+                    chosen.position.y,
+                    incident.position.x,
+                    incident.position.y,
+                )
+                margin = time_left - distance
+                forced_candidates.append(
+                    (margin, -1 if len(missing) > 1 else 0, distance, chosen.id, incident.id)
+                )
+
+    if forced_candidates:
+        _, _, _, unit_id, incident_id = min(forced_candidates)
+        return DispatchAction(unit_id=unit_id, incident_id=incident_id)
 
     best_score = float("-inf")
     best_action = DispatchAction()
@@ -99,10 +226,42 @@ def heuristic_policy(state: EnvironmentState) -> DispatchAction:
     for incident in incidents:
         required = set(incident.required_units)
         responding = set(incident.responding_units)
+        planned = set(responding)
+        for unit in state.units:
+            if unit.target_incident_id == incident.id:
+                planned.add(unit.unit_type)
+
         missing = required - responding
+        missing_effective = required - planned
+
+        severity_weight = {
+            Severity.LOW: 1.0,
+            Severity.MEDIUM: 2.5,
+            Severity.CRITICAL: 6.0,
+        }[incident.severity]
+
         urgency = incident.elapsed / max(1, incident.max_wait)
-        severity_score = SEVERITY_PRIORITY[incident.severity]
-        first_response_bonus = 1.0 if incident.first_response_step is None else 0.0
+
+        slack = incident.max_wait - incident.elapsed
+        deadline_pressure = 2.5 if slack <= 2 else 1 / (1 + slack)
+
+        multi_agent_bonus = 2.5 if len(missing) > 1 else 0.0
+
+        first_response_bonus = 2.0 if incident.first_response_step is None else 0.0
+
+        incident_priority = (
+            4.0 * severity_weight
+            + 3.0 * urgency
+            + 3.0 * deadline_pressure
+            + multi_agent_bonus
+            + first_response_bonus
+        )
+
+        doomed = False
+        for needed_type in missing_effective:
+            if min_eta_for_type(needed_type, incident) > slack:
+                doomed = True
+                break
 
         for unit in units:
             distance = travel_distance(
@@ -113,29 +272,37 @@ def heuristic_policy(state: EnvironmentState) -> DispatchAction:
             )
 
             if unit.unit_type in missing:
-                suitability = 1.6
+                suitability = 3.5
             elif unit.unit_type in required:
-                suitability = -0.8
+                suitability = -2.5
             else:
-                suitability = -2.0
+                suitability = -6.0
 
-            slack = incident.max_wait - incident.elapsed - distance
-            if slack <= 0:
-                deadline_pressure = 1.6
-            else:
-                deadline_pressure = 1.0 / (1.0 + slack)
+            time_left = incident.max_wait - incident.elapsed
+            feasibility_penalty = -8.0 if distance > time_left else 0.0
+            distance_penalty = -1.2 * distance
+            overcommit_penalty = -3.0 if len(responding) >= len(required) else 0.0
+            critical_completion_bonus = (
+                7.0
+                if incident.severity == Severity.CRITICAL
+                and len(responding) > 0
+                and unit.unit_type in missing
+                else 0.0
+            )
+            doomed_penalty = -10.0 if doomed and incident.severity != Severity.CRITICAL else 0.0
 
-            pair_score = (
-                3.4 * severity_score
-                + 2.2 * suitability
-                + 1.8 * deadline_pressure
-                + 1.4 * urgency
-                + 1.8 * first_response_bonus
-                - 0.25 * distance
+            score = (
+                incident_priority
+                + 2.5 * suitability
+                + feasibility_penalty
+                + distance_penalty
+                + overcommit_penalty
+                + critical_completion_bonus
+                + doomed_penalty
             )
 
-            if pair_score > best_score:
-                best_score = pair_score
+            if score > best_score:
+                best_score = score
                 best_action = DispatchAction(unit_id=unit.id, incident_id=incident.id)
 
     return best_action
