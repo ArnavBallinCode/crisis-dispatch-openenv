@@ -27,9 +27,14 @@ if load_dotenv is not None:
 # Environment variable resolution (strict hackathon rules)
 # ---------------------------------------------------------------------------
 
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+# Required/optional envs expected by the submission checklist.
+HF_TOKEN = os.getenv("HF_TOKEN")
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+
+# Backward-compatible key alias for local/provider flexibility.
+API_KEY = HF_TOKEN or os.getenv("API_KEY")
 ENV_NAME = "crisis-dispatch"
 
 
@@ -453,7 +458,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run crisis-dispatch baseline inference")
     # Default to openai when an API key is present (spec requirement),
     # fall back to heuristic for CI/local runs without credentials.
-    default_mode = "openai" if (os.getenv("HF_TOKEN") or os.getenv("API_KEY")) else "heuristic"
+    default_mode = "openai" if (HF_TOKEN or os.getenv("API_KEY")) else "heuristic"
     parser.add_argument(
         "--mode",
         choices=["heuristic", "random", "openai"],

@@ -72,22 +72,45 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate required secrets
+      - name: Resolve Hugging Face target
+        id: hf-target
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE_ID: ${{ secrets.HF_SPACE_ID }}
         run: |
-          if [ -z "$HF_TOKEN" ] || [ -z "$HF_SPACE_ID" ]; then
+          set -euo pipefail
+
+          if [ -z "${HF_TOKEN:-}" ] || [ -z "${HF_SPACE_ID:-}" ]; then
             echo "HF_TOKEN and HF_SPACE_ID must be configured in GitHub repository secrets."
             exit 1
           fi
 
+          HF_SPACE_TARGET="${HF_SPACE_ID%/}"
+          case "$HF_SPACE_TARGET" in
+            https://huggingface.co/spaces/*)
+              HF_SPACE_TARGET="${HF_SPACE_TARGET#https://huggingface.co/spaces/}"
+              ;;
+            http://huggingface.co/spaces/*)
+              HF_SPACE_TARGET="${HF_SPACE_TARGET#http://huggingface.co/spaces/}"
+              ;;
+          esac
+
+          if [[ ! "$HF_SPACE_TARGET" =~ ^[^/]+/[^/]+$ ]]; then
+            echo "Invalid HF_SPACE_ID: '$HF_SPACE_ID'"
+            echo "Expected format: owner/space OR https://huggingface.co/spaces/owner/space"
+            exit 1
+          fi
+
+          echo "space_id=$HF_SPACE_TARGET" >> "$GITHUB_OUTPUT"
+
       - name: Push latest main commit to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_SPACE_ID: ${{ secrets.HF_SPACE_ID }}
+          HF_SPACE_ID: ${{ steps.hf-target.outputs.space_id }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote remove hf >/dev/null 2>&1 || true
           git remote add hf "https://oauth2:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_ID}"
           git push hf HEAD:main --force
