@@ -69,6 +69,22 @@ def test_demo_run_endpoint_reaches_final_score() -> None:
     assert grader_payload["grade"]["score"] == payload["score"]
 
 
+def test_demo_benchmark_endpoint_returns_all_tasks() -> None:
+    response = client.get("/demo/benchmark")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["policy"] == "inference.heuristic_policy"
+
+    results = payload["results"]
+    assert {"easy", "medium", "hard"}.issubset(set(results.keys()))
+
+    for task_id in ["easy", "medium", "hard"]:
+        row = results[task_id]
+        assert 0.0 <= row["score"] <= 1.0
+        assert row["steps"] >= 1
+
+
 @pytest.mark.external
 def test_remote_hf_space_endpoints_if_configured() -> None:
     ping_url = os.getenv("PING_URL", "").strip().rstrip("/")

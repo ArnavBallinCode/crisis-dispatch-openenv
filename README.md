@@ -130,6 +130,7 @@ docker run --rm -p 7860:7860 crisis-dispatch-env
 | `/` | `GET` | Interactive demo UI for reset/step/state/grader testing |
 | `/meta` | `GET` | Lightweight JSON status metadata |
 | `/demo/run/{task_id}` | `POST` | Auto-runs a full heuristic episode on selected task |
+| `/demo/benchmark` | `GET` | Runs deterministic heuristic on easy/medium/hard |
 | `/reset` | `POST` | Start new episode |
 | `/step` | `POST` | Submit an action |
 | `/state` | `GET` | Current environment state |
@@ -141,6 +142,43 @@ docker run --rm -p 7860:7860 crisis-dispatch-env
 The Hugging Face Space homepage is intentionally interactive so reviewers can validate the OpenEnv interface behavior directly from the Space URL without external tools.
 
 Note: `/grader` reports score for the current in-progress episode state. For a complete non-zero demo run in one call, use `/demo/run/{task_id}` or the homepage auto-demo button.
+
+## Using The Space Demo (Step By Step)
+
+When you open the Space URL, you can simulate an episode directly in the browser.
+
+1. Choose a task (`easy`, `medium`, `hard`) and click **Reset Task**.
+2. Select a `unit_id` and an `incident_id` from dropdowns populated from the latest state.
+3. Click **Step Dispatch** to send that unit to that incident.
+4. Click **Step Wait** when no dispatch should be made this turn.
+5. Click **Get Score** to inspect the current grading snapshot.
+6. Click **Run Auto Demo (selected task)** to execute the full deterministic heuristic episode.
+7. Click **Run Benchmark (all tasks)** to compare easy/medium/hard scores in one shot.
+
+### What `unit_id` and `incident_id` mean
+
+- `unit_id`: emergency resource to dispatch (examples: `A1`, `F1`, `P1`)
+- `incident_id`: active emergency call (examples: `E-MED-1`, `M-FIRE-1`, `H-TRAFFIC-1`)
+
+The demo UI only shows currently valid options to reduce invalid actions.
+
+## Score Consistency: Local vs Hugging Face Space
+
+The Space demo endpoints use the **same deterministic heuristic policy** as `inference.py`.
+
+- Local command:
+
+```bash
+python inference.py --mode heuristic --task all --check-determinism
+```
+
+- Space benchmark endpoint:
+
+```bash
+curl -s https://blackmamba2408-crisis-dispatch-openenv.hf.space/demo/benchmark
+```
+
+If the Space has finished rebuilding from the latest commit, these should align closely task-by-task.
 
 ## Environment Variables
 

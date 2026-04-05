@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
@@ -14,6 +14,7 @@ except ImportError:  # pragma: no cover
 from app.environment import CrisisDispatchEnvironment
 from app.models import Action, Observation, ResetRequest, ScoreResponse, StepResult, TaskSummary
 from app.tasks import list_task_summaries
+from inference import heuristic_policy
 
 
 if load_dotenv is not None:
@@ -180,6 +181,7 @@ def root() -> str:
         .endpoints a:hover { text-decoration: underline; }
         @media (min-width: 900px) {
             .grid { grid-template-columns: 1fr 1fr; }
+            .card.full { grid-column: 1 / -1; }
         }
     </style>
 </head>
@@ -200,6 +202,7 @@ def root() -> str:
                 <a href="/tasks" target="_blank" rel="noopener">Tasks JSON</a>
                 <a href="/health" target="_blank" rel="noopener">Health</a>
                 <a href="/meta" target="_blank" rel="noopener">Meta JSON</a>
+                <a href="/demo/benchmark" target="_blank" rel="noopener">Benchmark JSON</a>
             </div>
         </section>
 
@@ -215,19 +218,25 @@ def root() -> str:
                         <button class="ghost" id="scoreBtn">Get Score</button>
                     </div>
                     <div class="row">
-                        <label for="unitInput">unit_id</label>
-                        <input id="unitInput" placeholder="A1">
-                        <label for="incidentInput">incident_id</label>
-                        <input id="incidentInput" placeholder="E-MED-1">
+                        <label for="unitSelect">unit_id</label>
+                        <select id="unitSelect">
+                            <option value="">Choose available unit</option>
+                        </select>
+                        <label for="incidentSelect">incident_id</label>
+                        <select id="incidentSelect">
+                            <option value="">Choose active incident</option>
+                        </select>
                     </div>
                     <div class="row">
                         <button class="secondary" id="dispatchBtn">Step Dispatch</button>
                         <button class="warm" id="waitBtn">Step Wait</button>
                         <button class="primary" id="autoBtn">Run Auto Demo (selected task)</button>
+                        <button class="secondary" id="benchmarkBtn">Run Benchmark (all tasks)</button>
                         <button class="ghost" id="baselineBtn">Run Baseline (easy)</button>
                     </div>
+                    <div id="snapshot" class="status">Snapshot pending...</div>
                     <div id="status" class="status">
-                        Ready. Grader reflects the current episode state and can stay at 0 until incidents are resolved.
+                        Ready. Use dropdowns to pick valid IDs; they auto-refresh from current state.
                     </div>
                 </div>
             </article>
@@ -238,13 +247,41 @@ def root() -> str:
                     <pre id="output">Loading tasks...</pre>
                 </div>
             </article>
+
+            <article class="card full">
+                <div class="head">How This Demo Works</div>
+                <div class="body">
+                    <p class="subtitle" style="margin-bottom:10px;">
+                        <strong>unit_id</strong> is the emergency vehicle you dispatch (for example <code>A1</code>, <code>F1</code>, <code>P1</code>).
+                        <strong>incident_id</strong> is the active emergency call (for example <code>E-MED-1</code>, <code>M-FIRE-1</code>).
+                    </p>
+                    <p class="subtitle" style="margin-bottom:10px;">
+                        Score behavior: <code>/grader</code> reports the score for the current episode snapshot. It can remain low while incidents are unresolved.
+                        Use <strong>Run Auto Demo</strong> to complete an episode and view final score.
+                    </p>
+                    <p class="subtitle" style="margin-bottom:6px;"><strong>Recommended flow</strong></p>
+                    <ol style="margin: 0 0 12px 18px; color: var(--muted);">
+                        <li>Choose task and click <strong>Reset Task</strong>.</li>
+                        <li>Select unit and incident from dropdowns, then click <strong>Step Dispatch</strong>.</li>
+                        <li>Use <strong>Step Wait</strong> when no dispatch should be made.</li>
+                        <li>Click <strong>Get Score</strong> to inspect the current snapshot.</li>
+                        <li>Click <strong>Run Auto Demo</strong> for a full deterministic episode score.</li>
+                        <li>Click <strong>Run Benchmark</strong> to compare easy/medium/hard against local heuristic scores.</li>
+                    </ol>
+                    <div id="idGuide" class="status">IDs will appear after reset/state refresh.</div>
+                </div>
+            </article>
         </section>
     </div>
 
     <script>
         const outputEl = document.getElementById("output");
         const statusEl = document.getElementById("status");
+        const snapshotEl = document.getElementById("snapshot");
+        const idGuideEl = document.getElementById("idGuide");
         const taskSelect = document.getElementById("taskSelect");
+        const unitSelect = document.getElementById("unitSelect");
+        const incidentSelect = document.getElementById("incidentSelect");
 
         function showStatus(text, level) {
             statusEl.textContent = text;
@@ -275,6 +312,58 @@ def root() -> str:
             return payload;
         }
 
+        function summarizeState(obs) {
+            snapshotEl.textContent =
+                "task=" + obs.task_id +
+                " | step=" + obs.step_count + "/" + obs.max_steps +
+                " | done=" + obs.done +
+                " | cumulative_reward=" + Number(obs.cumulative_reward).toFixed(2);
+        }
+
+        function refreshActionOptions(obs) {
+            const availableUnits = obs.units.filter((u) => u.status === "available");
+            const activeIncidents = obs.incidents.filter((i) => !i.resolved && !i.failed);
+
+            const prevUnit = unitSelect.value;
+            const prevIncident = incidentSelect.value;
+
+            unitSelect.innerHTML = '<option value="">Choose available unit</option>';
+            availableUnits.forEach((unit) => {
+                const opt = document.createElement("option");
+                opt.value = unit.id;
+                opt.textContent = unit.id + " (" + unit.unit_type + " @ " + unit.position.x + "," + unit.position.y + ")";
+                unitSelect.appendChild(opt);
+            });
+
+            incidentSelect.innerHTML = '<option value="">Choose active incident</option>';
+            activeIncidents.forEach((incident) => {
+                const opt = document.createElement("option");
+                opt.value = incident.id;
+                opt.textContent =
+                    incident.id +
+                    " (" + incident.severity + ", needs " + incident.required_units.join("+") + ")";
+                incidentSelect.appendChild(opt);
+            });
+
+            if (prevUnit && availableUnits.some((u) => u.id === prevUnit)) unitSelect.value = prevUnit;
+            if (prevIncident && activeIncidents.some((i) => i.id === prevIncident)) incidentSelect.value = prevIncident;
+
+            const unitsLabel = availableUnits.length
+                ? availableUnits.map((u) => u.id + "=" + u.unit_type).join(", ")
+                : "none";
+            const incidentsLabel = activeIncidents.length
+                ? activeIncidents.map((i) => i.id + "=" + i.incident_type + "/" + i.severity).join(", ")
+                : "none";
+
+            idGuideEl.textContent =
+                "Available units: " + unitsLabel + " | Active incidents: " + incidentsLabel;
+        }
+
+        function syncFromObservation(obs) {
+            summarizeState(obs);
+            refreshActionOptions(obs);
+        }
+
         async function loadTasks() {
             const tasks = await api("/tasks");
             taskSelect.innerHTML = "";
@@ -288,9 +377,12 @@ def root() -> str:
             return tasks;
         }
 
-        async function refreshState() {
+        async function refreshState(options) {
             const payload = await api("/state");
-            outputEl.textContent = pretty({ endpoint: "/state", payload });
+            if (!options || !options.preserveOutput) {
+                outputEl.textContent = pretty({ endpoint: "/state", payload });
+            }
+            syncFromObservation(payload);
             showStatus("State refreshed.", "ok");
         }
 
@@ -298,9 +390,13 @@ def root() -> str:
             const payload = await api("/grader");
             outputEl.textContent = pretty({ endpoint: "/grader", payload });
             if (payload.done) {
-                showStatus("Final score refreshed.", "ok");
+                showStatus("Final score: " + payload.grade.score.toFixed(4), "ok");
             } else {
-                showStatus("Episode still running. Keep stepping or use auto demo.", null);
+                showStatus(
+                    "Snapshot score " + payload.grade.score.toFixed(4) +
+                    " (episode still running). Keep stepping or use auto demo.",
+                    null
+                );
             }
         }
 
@@ -308,26 +404,29 @@ def root() -> str:
             const taskId = taskSelect.value;
             const payload = await api("/reset/" + encodeURIComponent(taskId), { method: "POST" });
             outputEl.textContent = pretty({ endpoint: "/reset/" + taskId, payload });
+            syncFromObservation(payload.observation);
             showStatus("Task reset to " + taskId + ".", "ok");
         }
 
         async function stepDispatch() {
-            const unitId = document.getElementById("unitInput").value.trim();
-            const incidentId = document.getElementById("incidentInput").value.trim();
+            const unitId = unitSelect.value;
+            const incidentId = incidentSelect.value;
             if (!unitId || !incidentId) {
-                throw new Error("Provide both unit_id and incident_id, or use Step Wait.");
+                throw new Error("Select both unit_id and incident_id from the dropdowns, or use Step Wait.");
             }
             const body = {};
             if (unitId) body.unit_id = unitId;
             if (incidentId) body.incident_id = incidentId;
             const payload = await api("/step", { method: "POST", body: JSON.stringify(body) });
             outputEl.textContent = pretty({ endpoint: "/step", action: body, payload });
+            syncFromObservation(payload.observation);
             showStatus("Step submitted.", "ok");
         }
 
         async function stepWait() {
             const payload = await api("/step", { method: "POST", body: "{}" });
             outputEl.textContent = pretty({ endpoint: "/step", action: {}, payload });
+            syncFromObservation(payload.observation);
             showStatus("Wait step submitted.", "ok");
         }
 
@@ -335,6 +434,7 @@ def root() -> str:
             const payload = await api("/baseline");
             outputEl.textContent = pretty({ endpoint: "/baseline", payload });
             showStatus("Baseline completed.", "ok");
+            await refreshState({ preserveOutput: true });
         }
 
         async function runAutoDemo() {
@@ -342,6 +442,13 @@ def root() -> str:
             const payload = await api("/demo/run/" + encodeURIComponent(taskId), { method: "POST" });
             outputEl.textContent = pretty({ endpoint: "/demo/run/" + taskId, payload });
             showStatus("Auto demo finished with score " + payload.score.toFixed(4) + ".", "ok");
+            await refreshState({ preserveOutput: true });
+        }
+
+        async function runBenchmark() {
+            const payload = await api("/demo/benchmark");
+            outputEl.textContent = pretty({ endpoint: "/demo/benchmark", payload });
+            showStatus("Benchmark refreshed for easy/medium/hard.", "ok");
         }
 
         async function guarded(runFn) {
@@ -359,6 +466,7 @@ def root() -> str:
         document.getElementById("dispatchBtn").addEventListener("click", () => guarded(stepDispatch));
         document.getElementById("waitBtn").addEventListener("click", () => guarded(stepWait));
         document.getElementById("autoBtn").addEventListener("click", () => guarded(runAutoDemo));
+        document.getElementById("benchmarkBtn").addEventListener("click", () => guarded(runBenchmark));
         document.getElementById("baselineBtn").addEventListener("click", () => guarded(runBaseline));
 
         (async () => {
@@ -442,6 +550,28 @@ def run_demo_episode(task_id: str) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/demo/benchmark")
+def demo_benchmark() -> dict:
+    """Run the same deterministic heuristic as inference.py across all tasks."""
+    summaries = list_task_summaries()
+    results: Dict[str, dict] = {}
+
+    for summary in summaries:
+        env = CrisisDispatchEnvironment(default_task_id=summary.id)
+        episode = _run_heuristic_episode(env, summary.id)
+        results[summary.id] = {
+            "score": episode["score"],
+            "steps": episode["steps"],
+            "cumulative_reward": episode["cumulative_reward"],
+        }
+
+    return {
+        "policy": "inference.heuristic_policy",
+        "note": "These scores should match local `python inference.py --mode heuristic --task all --check-determinism`.",
+        "results": results,
+    }
+
+
 @app.get("/baseline")
 def baseline() -> dict:
     """Run heuristic baseline on the easy task and return scores."""
@@ -455,8 +585,7 @@ def _run_heuristic_episode(env: CrisisDispatchEnvironment, task_id: str) -> dict
     actions = []
 
     while not obs.done:
-        # Simple nearest-available-correct-unit heuristic
-        action = _baseline_heuristic(obs)
+        action = heuristic_policy(obs)
         actions.append({"unit_id": action.unit_id, "incident_id": action.incident_id})
         result = env.step(action)
         rewards.append(result.reward)
@@ -473,34 +602,3 @@ def _run_heuristic_episode(env: CrisisDispatchEnvironment, task_id: str) -> dict
         "actions": actions,
         "grade": grade.model_dump(),
     }
-
-
-def _baseline_heuristic(obs: Observation) -> Action:
-    """Minimal correct-type nearest dispatch for baseline endpoint."""
-    active = [i for i in obs.incidents if not i.resolved and not i.failed]
-    avail = [u for u in obs.units if u.status.value == "available"]
-
-    if not active or not avail:
-        return Action()
-
-    best_score = float("-inf")
-    best_action = Action()
-
-    for incident in active:
-        required = set(incident.required_units)
-        responding = set(incident.responding_units)
-        missing = required - responding
-
-        for unit in avail:
-            if unit.unit_type not in missing:
-                continue
-            distance = abs(unit.position.x - incident.position.x) + abs(unit.position.y - incident.position.y)
-            slack = incident.max_wait - incident.elapsed
-            if distance > slack:
-                continue
-            score = 3.0 * (3.5 if incident.severity.value == "critical" else 1.0) - distance
-            if score > best_score:
-                best_score = score
-                best_action = Action(unit_id=unit.id, incident_id=incident.id)
-
-    return best_action
