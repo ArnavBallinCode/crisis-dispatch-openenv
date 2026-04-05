@@ -52,6 +52,23 @@ def test_local_step_and_score_contract() -> None:
     assert 0.0 <= score_payload["grade"]["score"] <= 1.0
 
 
+def test_demo_run_endpoint_reaches_final_score() -> None:
+    response = client.post("/demo/run/easy")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["task_id"] == "easy"
+    assert payload["done"] is True
+    assert payload["steps"] >= 1
+    assert 0.0 <= payload["score"] <= 1.0
+
+    grader_response = client.get("/grader")
+    assert grader_response.status_code == 200
+    grader_payload = grader_response.json()
+    assert grader_payload["done"] is True
+    assert grader_payload["grade"]["score"] == payload["score"]
+
+
 @pytest.mark.external
 def test_remote_hf_space_endpoints_if_configured() -> None:
     ping_url = os.getenv("PING_URL", "").strip().rstrip("/")

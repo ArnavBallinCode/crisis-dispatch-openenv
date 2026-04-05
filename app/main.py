@@ -223,9 +223,12 @@ def root() -> str:
                     <div class="row">
                         <button class="secondary" id="dispatchBtn">Step Dispatch</button>
                         <button class="warm" id="waitBtn">Step Wait</button>
+                        <button class="primary" id="autoBtn">Run Auto Demo (selected task)</button>
                         <button class="ghost" id="baselineBtn">Run Baseline (easy)</button>
                     </div>
-                    <div id="status" class="status">Ready.</div>
+                    <div id="status" class="status">
+                        Ready. Grader reflects the current episode state and can stay at 0 until incidents are resolved.
+                    </div>
                 </div>
             </article>
 
@@ -294,7 +297,11 @@ def root() -> str:
         async function refreshScore() {
             const payload = await api("/grader");
             outputEl.textContent = pretty({ endpoint: "/grader", payload });
-            showStatus("Score refreshed.", "ok");
+            if (payload.done) {
+                showStatus("Final score refreshed.", "ok");
+            } else {
+                showStatus("Episode still running. Keep stepping or use auto demo.", null);
+            }
         }
 
         async function resetTask() {
@@ -307,6 +314,9 @@ def root() -> str:
         async function stepDispatch() {
             const unitId = document.getElementById("unitInput").value.trim();
             const incidentId = document.getElementById("incidentInput").value.trim();
+            if (!unitId || !incidentId) {
+                throw new Error("Provide both unit_id and incident_id, or use Step Wait.");
+            }
             const body = {};
             if (unitId) body.unit_id = unitId;
             if (incidentId) body.incident_id = incidentId;
@@ -327,6 +337,13 @@ def root() -> str:
             showStatus("Baseline completed.", "ok");
         }
 
+        async function runAutoDemo() {
+            const taskId = taskSelect.value;
+            const payload = await api("/demo/run/" + encodeURIComponent(taskId), { method: "POST" });
+            outputEl.textContent = pretty({ endpoint: "/demo/run/" + taskId, payload });
+            showStatus("Auto demo finished with score " + payload.score.toFixed(4) + ".", "ok");
+        }
+
         async function guarded(runFn) {
             try {
                 showStatus("Running...", null);
@@ -341,6 +358,7 @@ def root() -> str:
         document.getElementById("scoreBtn").addEventListener("click", () => guarded(refreshScore));
         document.getElementById("dispatchBtn").addEventListener("click", () => guarded(stepDispatch));
         document.getElementById("waitBtn").addEventListener("click", () => guarded(stepWait));
+        document.getElementById("autoBtn").addEventListener("click", () => guarded(runAutoDemo));
         document.getElementById("baselineBtn").addEventListener("click", () => guarded(runBaseline));
 
         (async () => {
@@ -415,27 +433,45 @@ def grader() -> ScoreResponse:
     return ScoreResponse(grade=grade, task_id=current_state.task_id, done=current_state.done)
 
 
+@app.post("/demo/run/{task_id}")
+def run_demo_episode(task_id: str) -> dict:
+    """Run a full heuristic episode on the shared environment for live demo purposes."""
+    try:
+        return _run_heuristic_episode(environment, task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/baseline")
 def baseline() -> dict:
     """Run heuristic baseline on the easy task and return scores."""
     env = CrisisDispatchEnvironment(default_task_id="easy")
-    obs = env.reset(task_id="easy")
+    return _run_heuristic_episode(env, "easy")
+
+
+def _run_heuristic_episode(env: CrisisDispatchEnvironment, task_id: str) -> dict:
+    obs = env.reset(task_id=task_id)
     rewards = []
+    actions = []
 
     while not obs.done:
         # Simple nearest-available-correct-unit heuristic
         action = _baseline_heuristic(obs)
+        actions.append({"unit_id": action.unit_id, "incident_id": action.incident_id})
         result = env.step(action)
         rewards.append(result.reward)
         obs = result.observation
 
     grade = env.grade()
     return {
-        "task_id": "easy",
+        "task_id": task_id,
         "score": grade.score,
         "cumulative_reward": obs.cumulative_reward,
         "steps": obs.step_count,
+        "done": obs.done,
         "rewards": rewards,
+        "actions": actions,
+        "grade": grade.model_dump(),
     }
 
 
