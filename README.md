@@ -127,6 +127,8 @@ docker run --rm -p 7860:7860 crisis-dispatch-env
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/` | `GET` | Interactive demo UI for reset/step/state/grader testing |
+| `/meta` | `GET` | Lightweight JSON status metadata |
 | `/reset` | `POST` | Start new episode |
 | `/step` | `POST` | Submit an action |
 | `/state` | `GET` | Current environment state |
@@ -134,6 +136,8 @@ docker run --rm -p 7860:7860 crisis-dispatch-env
 | `/grader` | `GET` | Score the current episode |
 | `/baseline` | `GET` | Run heuristic baseline on easy task |
 | `/health` | `GET` | Health check |
+
+The Hugging Face Space homepage is intentionally interactive so reviewers can validate the OpenEnv interface behavior directly from the Space URL without external tools.
 
 ## Environment Variables
 
