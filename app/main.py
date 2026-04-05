@@ -35,7 +35,7 @@ environment = CrisisDispatchEnvironment(default_task_id="easy")
 
 @app.get("/", response_class=HTMLResponse)
 def root() -> str:
-        return """<!doctype html>
+    return """<!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
@@ -359,11 +359,11 @@ def root() -> str:
 
 @app.get("/meta")
 def meta() -> dict:
-        return {
-                "name": "crisis-dispatch-env",
-                "message": "Crisis dispatch environment is ready",
-                "current_task": environment.state().task_id,
-        }
+    return {
+        "name": "crisis-dispatch-env",
+        "message": "Crisis dispatch environment is ready",
+        "current_task": environment.state().task_id,
+    }
 
 
 @app.get("/health")
