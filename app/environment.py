@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple
 
 from app.models import (
-    DispatchAction,
+    Action,
     EnvironmentMetrics,
-    EnvironmentState,
+    Observation,
     GradeResult,
     IncidentState,
     Severity,
@@ -28,10 +28,10 @@ class CrisisDispatchEnvironment:
 
     def __init__(self, default_task_id: str = "easy") -> None:
         self.default_task_id = default_task_id
-        self._state: Optional[EnvironmentState] = None
+        self._state: Optional[Observation] = None
         self.reset(task_id=default_task_id)
 
-    def reset(self, task_id: Optional[str] = None) -> EnvironmentState:
+    def reset(self, task_id: Optional[str] = None) -> Observation:
         selected_task_id = task_id or self.default_task_id
         task = get_task(selected_task_id)
 
@@ -67,7 +67,7 @@ class CrisisDispatchEnvironment:
             for incident in task.incidents
         ]
 
-        self._state = EnvironmentState(
+        self._state = Observation(
             task_id=task.id,
             task_name=task.name,
             difficulty=task.difficulty,
@@ -83,19 +83,19 @@ class CrisisDispatchEnvironment:
         )
         return self.state()
 
-    def state(self) -> EnvironmentState:
+    def state(self) -> Observation:
         if self._state is None:
             raise RuntimeError("Environment has not been initialized")
         return self._state.model_copy(deep=True)
 
-    def step(self, action: DispatchAction) -> StepResult:
+    def step(self, action: Action) -> StepResult:
         if self._state is None:
             raise RuntimeError("Environment has not been initialized")
 
         if self._state.done:
             final_score = self.grade().score
             return StepResult(
-                state=self.state(),
+                observation=self.state(),
                 reward=0.0,
                 done=True,
                 score=final_score,
@@ -124,7 +124,7 @@ class CrisisDispatchEnvironment:
 
         score = self.grade().score if self._state.done else None
         return StepResult(
-            state=self.state(),
+            observation=self.state(),
             reward=round(reward, 4),
             done=self._state.done,
             score=score,
@@ -136,7 +136,7 @@ class CrisisDispatchEnvironment:
             raise RuntimeError("Environment has not been initialized")
         return grade_episode(self._state)
 
-    def _apply_dispatch(self, action: DispatchAction) -> Tuple[float, str]:
+    def _apply_dispatch(self, action: Action) -> Tuple[float, str]:
         if self._state is None:
             raise RuntimeError("Environment has not been initialized")
 
@@ -254,7 +254,7 @@ class CrisisDispatchEnvironment:
             self._state.metrics.incidents_resolved += 1
 
             timeliness_factor = max(0.2, 1.0 - incident.elapsed / incident.max_wait)
-            reward += resolution_reward(incident.severity) * timeliness_factor
+            reward += resolution_reward(incident.initial_severity) * timeliness_factor
             return reward, f"{incident.id} resolved by {unit.id}"
 
         return reward, f"{unit.id} partially stabilized {incident.id}"
@@ -291,3 +291,7 @@ class CrisisDispatchEnvironment:
     @staticmethod
     def _manhattan_distance(x1: int, y1: int, x2: int, y2: int) -> int:
         return abs(x1 - x2) + abs(y1 - y2)
+
+    def close(self) -> None:
+        """Clean up (no-op for this deterministic environment)."""
+        self._state = None

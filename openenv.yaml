@@ -13,8 +13,9 @@ environment:
     - step(action)
     - state()
 
-action_model: app.models:DispatchAction
-observation_model: app.models:EnvironmentState
+action_model: app.models:Action
+observation_model: app.models:Observation
+reward_model: app.models:Reward
 step_result_model: app.models:StepResult
 
 tasks:

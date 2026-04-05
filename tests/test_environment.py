@@ -1,7 +1,7 @@
 import pytest
 
 from app.environment import CrisisDispatchEnvironment
-from app.models import DispatchAction
+from app.models import Action
 from app.tasks import TASKS
 
 
@@ -18,7 +18,7 @@ def test_environment_episode_finishes_with_valid_score(task_id: str) -> None:
     assert state.task_id == task_id
 
     while not state.done:
-        state = env.step(DispatchAction()).state
+        state = env.step(Action()).observation
 
     grade = env.grade()
     assert 0.0 <= grade.score <= 1.0

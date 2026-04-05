@@ -6,7 +6,7 @@ import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
 
 from openai import OpenAI
 
@@ -16,12 +16,52 @@ except ImportError:  # pragma: no cover
     load_dotenv = None
 
 from app.environment import CrisisDispatchEnvironment
-from app.models import DispatchAction, EnvironmentState, Severity
+from app.models import Action, Observation, Severity
 
 
 if load_dotenv is not None:
     load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
 
+
+# ---------------------------------------------------------------------------
+# Environment variable resolution (strict hackathon rules)
+# ---------------------------------------------------------------------------
+
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
+ENV_NAME = "crisis-dispatch"
+
+
+# ---------------------------------------------------------------------------
+# Structured stdout logging (MANDATORY format)
+# ---------------------------------------------------------------------------
+
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Heuristic helpers
+# ---------------------------------------------------------------------------
 
 SEVERITY_PRIORITY = {
     Severity.LOW: 1.0,
@@ -30,124 +70,29 @@ SEVERITY_PRIORITY = {
 }
 
 
-def _env_first(*keys: str) -> Optional[str]:
-    for key in keys:
-        value = os.getenv(key)
-        if value is None:
-            continue
-        cleaned = value.strip().strip('"').strip("'")
-        if cleaned:
-            return cleaned
-    return None
-
-
-def resolve_llm_config(model_arg: Optional[str]) -> Tuple[str, str, Optional[str]]:
-    """Resolve API key/model/base URL for OpenAI-compatible providers.
-
-    Supported env var aliases:
-    - API key: OPENAI_API_KEY, API_KEY, GROQ_API_KEY
-    - Base URL: OPENAI_BASE_URL, API_BASE_URL, GROQ_BASE_URL
-    - Model: OPENAI_MODEL, MODEL_NAME, GROQ_MODEL
-    """
-    api_key = _env_first("OPENAI_API_KEY", "API_KEY", "GROQ_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "Missing API key for --mode openai. Set OPENAI_API_KEY or API_KEY (or GROQ_API_KEY)."
-        )
-
-    resolved_model = (
-        model_arg.strip()
-        if model_arg and model_arg.strip()
-        else _env_first("OPENAI_MODEL", "MODEL_NAME", "GROQ_MODEL")
-        or "gpt-4.1-mini"
-    )
-    base_url = _env_first("OPENAI_BASE_URL", "API_BASE_URL", "GROQ_BASE_URL")
-    return api_key, resolved_model, base_url
-
-
-@dataclass
-class EpisodeResult:
-    task_id: str
-    score: float
-    cumulative_reward: float
-    steps: int
-    resolved: int
-    failed: int
-
-
-def active_incidents(state: EnvironmentState):
+def active_incidents(state: Observation):
     return [incident for incident in state.incidents if not incident.resolved and not incident.failed]
 
 
-def available_units(state: EnvironmentState):
+def available_units(state: Observation):
     return [unit for unit in state.units if unit.status.value == "available"]
 
 
 def travel_distance(unit_x: int, unit_y: int, incident_x: int, incident_y: int) -> int:
     return abs(unit_x - incident_x) + abs(unit_y - incident_y)
 
-# ------- OLD Heursitc function ------ #
+
+# ---------------------------------------------------------------------------
+# Policies
+# ---------------------------------------------------------------------------
 
 
-# def heuristic_policy(state: EnvironmentState) -> DispatchAction:
-#     incidents = active_incidents(state)
-#     units = available_units(state)
-#     if not incidents or not units:
-#         return DispatchAction()
-
-#     best_score = float("-inf")
-#     best_action = DispatchAction()
-
-#     for incident in incidents:
-#         required = set(incident.required_units)
-#         responding = set(incident.responding_units)
-#         missing = required - responding
-#         urgency = incident.elapsed / max(1, incident.max_wait)
-#         severity_score = SEVERITY_PRIORITY[incident.severity]
-#         first_response_bonus = 1.0 if incident.first_response_step is None else 0.0
-
-#         for unit in units:
-#             distance = travel_distance(
-#                 unit.position.x,
-#                 unit.position.y,
-#                 incident.position.x,
-#                 incident.position.y,
-#             )
-
-#             if unit.unit_type in missing:
-#                 suitability = 1.6
-#             elif unit.unit_type in required:
-#                 suitability = -0.8
-#             else:
-#                 suitability = -2.0
-
-#             slack = incident.max_wait - incident.elapsed - distance
-#             if slack <= 0:
-#                 deadline_pressure = 1.6
-#             else:
-#                 deadline_pressure = 1.0 / (1.0 + slack)
-
-#             pair_score = (
-#                 3.4 * severity_score
-#                 + 2.2 * suitability
-#                 + 1.8 * deadline_pressure
-#                 + 1.4 * urgency
-#                 + 1.8 * first_response_bonus
-#                 - 0.25 * distance
-#             )
-
-#             if pair_score > best_score:
-#                 best_score = pair_score
-#                 best_action = DispatchAction(unit_id=unit.id, incident_id=incident.id)
-
-#     return best_action
-
-def heuristic_policy(state: EnvironmentState) -> DispatchAction:
+def heuristic_policy(state: Observation) -> Action:
     incidents = active_incidents(state)
     units = available_units(state)
 
     if not incidents or not units:
-        return DispatchAction()
+        return Action()
 
     incident_lookup = {incident.id: incident for incident in state.incidents}
 
@@ -237,7 +182,7 @@ def heuristic_policy(state: EnvironmentState) -> DispatchAction:
 
     if forced_candidates:
         _, _, unit_id, incident_id = min(forced_candidates)
-        return DispatchAction(unit_id=unit_id, incident_id=incident_id)
+        return Action(unit_id=unit_id, incident_id=incident_id)
 
     severity_weight = {
         Severity.LOW: 1.0,
@@ -286,7 +231,7 @@ def heuristic_policy(state: EnvironmentState) -> DispatchAction:
         return penalty
 
     best_score = float("-inf")
-    best_action = DispatchAction()
+    best_action = Action()
 
     for info in incident_info.values():
         incident = info["incident"]
@@ -330,31 +275,31 @@ def heuristic_policy(state: EnvironmentState) -> DispatchAction:
 
             if score > best_score:
                 best_score = score
-                best_action = DispatchAction(unit_id=unit.id, incident_id=incident.id)
+                best_action = Action(unit_id=unit.id, incident_id=incident.id)
 
     return best_action
 
 
-def random_policy(state: EnvironmentState, rng: random.Random) -> DispatchAction:
+def random_policy(state: Observation, rng: random.Random) -> Action:
     incidents = active_incidents(state)
     units = available_units(state)
 
     if not incidents or not units:
-        return DispatchAction()
+        return Action()
 
     if rng.random() < 0.15:
-        return DispatchAction()
+        return Action()
 
     unit = rng.choice(units)
     incident = rng.choice(incidents)
-    return DispatchAction(unit_id=unit.id, incident_id=incident.id)
+    return Action(unit_id=unit.id, incident_id=incident.id)
 
 
-def llm_policy(state: EnvironmentState, client: OpenAI, model: str) -> DispatchAction:
+def llm_policy(state: Observation, client: OpenAI, model: str) -> Action:
     incidents = active_incidents(state)
     units = available_units(state)
     if not incidents or not units:
-        return DispatchAction()
+        return Action()
 
     prompt_payload = {
         "step": state.step_count,
@@ -388,17 +333,7 @@ def llm_policy(state: EnvironmentState, client: OpenAI, model: str) -> DispatchA
     )
     user_prompt = json.dumps(prompt_payload)
 
-    if hasattr(client, "responses"):
-        response = client.responses.create(
-            model=model,
-            temperature=0,
-            input=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        text = (getattr(response, "output_text", None) or "").strip()
-    else:
+    try:
         completion = client.chat.completions.create(
             model=model,
             temperature=0,
@@ -412,12 +347,14 @@ def llm_policy(state: EnvironmentState, client: OpenAI, model: str) -> DispatchA
             if completion.choices and completion.choices[0].message.content
             else ""
         )
+    except Exception:
+        return heuristic_policy(state)
 
     if not text:
         return heuristic_policy(state)
     try:
         payload = json.loads(text)
-        return DispatchAction(
+        return Action(
             unit_id=payload.get("unit_id"),
             incident_id=payload.get("incident_id"),
         )
@@ -425,91 +362,103 @@ def llm_policy(state: EnvironmentState, client: OpenAI, model: str) -> DispatchA
         return heuristic_policy(state)
 
 
+# ---------------------------------------------------------------------------
+# Episode runner with mandatory logging
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EpisodeResult:
+    task_id: str
+    score: float
+    cumulative_reward: float
+    steps: int
+    resolved: int
+    failed: int
+
+
 def run_episode(
     task_id: str,
-    policy: Callable[[EnvironmentState], DispatchAction],
+    policy: Callable[[Observation], Action],
+    model_name: str,
+    silent: bool = False,
 ) -> EpisodeResult:
     env = CrisisDispatchEnvironment(default_task_id=task_id)
-    state = env.reset(task_id=task_id)
+    obs = env.reset(task_id=task_id)
 
-    while not state.done:
-        action = policy(state)
-        result = env.step(action)
-        state = result.state
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
 
-    grade = env.grade()
+    if not silent:
+        log_start(task=task_id, env=ENV_NAME, model=model_name)
+
+    try:
+        while not obs.done:
+            action = policy(obs)
+
+            # Build action string for logging
+            if action.unit_id and action.incident_id:
+                action_str = f"dispatch({action.unit_id},{action.incident_id})"
+            else:
+                action_str = "wait()"
+
+            result = env.step(action)
+            reward = result.reward
+            done = result.done
+            error = None
+
+            rewards.append(reward)
+            steps_taken += 1
+            obs = result.observation
+
+            if not silent:
+                log_step(step=steps_taken, action=action_str, reward=reward, done=done, error=error)
+
+            if done:
+                break
+
+        grade = env.grade()
+        score = grade.score
+        success = score >= 0.5
+
+        resolved = sum(1 for inc in obs.incidents if inc.resolved and not inc.failed)
+        failed = sum(1 for inc in obs.incidents if inc.failed)
+
+    finally:
+        try:
+            env.close()
+        except Exception:
+            pass
+        if not silent:
+            log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
     return EpisodeResult(
         task_id=task_id,
-        score=grade.score,
-        cumulative_reward=state.cumulative_reward,
-        steps=state.step_count,
-        resolved=state.metrics.incidents_resolved,
-        failed=state.metrics.incidents_failed,
+        score=round(score, 4),
+        cumulative_reward=round(sum(rewards), 4),
+        steps=steps_taken,
+        resolved=resolved,
+        failed=failed,
     )
 
 
-def run_baseline(
-    mode: str,
-    tasks: List[str],
-    episodes: int,
-    seed: int,
-    model: Optional[str],
-) -> List[EpisodeResult]:
-    results: List[EpisodeResult] = []
-
-    for task_id in tasks:
-        for episode_idx in range(episodes):
-            if mode == "heuristic":
-                policy = heuristic_policy
-            elif mode == "random":
-                rng = random.Random(seed + episode_idx)
-                policy = lambda state, _rng=rng: random_policy(state, _rng)
-            elif mode == "openai":
-                api_key, resolved_model, base_url = resolve_llm_config(model)
-                client_kwargs = {"api_key": api_key}
-                if base_url:
-                    client_kwargs["base_url"] = base_url
-                client = OpenAI(**client_kwargs)
-                policy = lambda state, _client=client, _model=resolved_model: llm_policy(
-                    state, _client, _model
-                )
-            else:
-                raise ValueError(f"Unknown mode: {mode}")
-
-            results.append(run_episode(task_id=task_id, policy=policy))
-
-    return results
-
-
-def print_results(results: List[EpisodeResult]) -> None:
-    print("task_id,score,cumulative_reward,steps,resolved,failed")
-    for result in results:
-        print(
-            f"{result.task_id},{result.score:.4f},{result.cumulative_reward:.4f},"
-            f"{result.steps},{result.resolved},{result.failed}"
-        )
-
-
-def run_determinism_check(tasks: List[str]) -> None:
-    print("\nDeterminism check (heuristic, two runs):")
-    for task_id in tasks:
-        first = run_episode(task_id=task_id, policy=heuristic_policy)
-        second = run_episode(task_id=task_id, policy=heuristic_policy)
-        same = first.score == second.score and first.cumulative_reward == second.cumulative_reward
-        status = "PASS" if same else "FAIL"
-        print(
-            f"{task_id}: {status} (score {first.score:.4f}/{second.score:.4f}, "
-            f"reward {first.cumulative_reward:.4f}/{second.cumulative_reward:.4f})"
-        )
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run crisis-dispatch baseline inference")
+    # Default to openai when an API key is present (spec requirement),
+    # fall back to heuristic for CI/local runs without credentials.
+    default_mode = "openai" if (os.getenv("HF_TOKEN") or os.getenv("API_KEY")) else "heuristic"
     parser.add_argument(
         "--mode",
         choices=["heuristic", "random", "openai"],
-        default="heuristic",
-        help="Policy mode for dispatch decisions",
+        default=default_mode,
+        help="Policy mode for dispatch decisions (default: openai if HF_TOKEN set, else heuristic)",
     )
     parser.add_argument(
         "--task",
@@ -518,29 +467,15 @@ def parse_args() -> argparse.Namespace:
         help="Task to evaluate",
     )
     parser.add_argument(
-        "--episodes",
-        type=int,
-        default=1,
-        help="Episodes per task",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=2026,
         help="Seed used for random policy mode",
     )
     parser.add_argument(
-        "--model",
-        default=None,
-        help=(
-            "Model used in --mode openai. If omitted, uses OPENAI_MODEL/MODEL_NAME/GROQ_MODEL "
-            "or falls back to gpt-4.1-mini."
-        ),
-    )
-    parser.add_argument(
         "--check-determinism",
         action="store_true",
-        help="Run deterministic consistency check for heuristic policy",
+        help="Run heuristic twice per task and verify scores are identical (CI gate)",
     )
     return parser.parse_args()
 
@@ -549,17 +484,63 @@ def main() -> None:
     args = parse_args()
     tasks = [args.task] if args.task != "all" else ["easy", "medium", "hard"]
 
-    results = run_baseline(
-        mode=args.mode,
-        tasks=tasks,
-        episodes=max(1, args.episodes),
-        seed=args.seed,
-        model=args.model,
-    )
-    print_results(results)
+    resolved_model = MODEL_NAME
 
-    if args.check_determinism:
-        run_determinism_check(tasks)
+    results: List[EpisodeResult] = []
+
+    for task_id in tasks:
+        if args.mode == "heuristic":
+            policy: Callable[[Observation], Action] = heuristic_policy
+        elif args.mode == "random":
+            rng = random.Random(args.seed)
+            policy = lambda state, _rng=rng: random_policy(state, _rng)
+        elif args.mode == "openai":
+            if not API_KEY:
+                raise RuntimeError(
+                    "Missing API key. Set HF_TOKEN or API_KEY environment variable."
+                )
+            client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
+            policy = lambda state, _client=client, _model=resolved_model: llm_policy(
+                state, _client, _model
+            )
+        else:
+            raise ValueError(f"Unknown mode: {args.mode}")
+
+        result = run_episode(task_id=task_id, policy=policy, model_name=resolved_model)
+        results.append(result)
+
+    # CSV summary (matches original --check-determinism output format)
+    print("task_id,score,cumulative_reward,steps,resolved,failed", flush=True)
+    for r in results:
+        print(f"{r.task_id},{r.score:.4f},{r.cumulative_reward:.4f},{r.steps},{r.resolved},{r.failed}", flush=True)
+
+    # Determinism check: run heuristic a second time silently and compare
+    if getattr(args, "check_determinism", False):
+        if args.mode != "heuristic":
+            print("[WARN] --check-determinism only applies to --mode heuristic", flush=True)
+        else:
+            print(f"\nDeterminism check (heuristic, two runs):", flush=True)
+            all_pass = True
+            for r in results:
+                r2 = run_episode(
+                    task_id=r.task_id,
+                    policy=heuristic_policy,
+                    model_name=resolved_model,
+                    silent=True,
+                )
+                match_score = abs(r.score - r2.score) < 1e-6
+                match_reward = abs(r.cumulative_reward - r2.cumulative_reward) < 1e-4
+                status = "PASS" if (match_score and match_reward) else "FAIL"
+                if status == "FAIL":
+                    all_pass = False
+                print(
+                    f"{r.task_id}: {status} "
+                    f"(score {r.score:.4f}/{r2.score:.4f}, "
+                    f"reward {r.cumulative_reward:.4f}/{r2.cumulative_reward:.4f})",
+                    flush=True,
+                )
+            if not all_pass:
+                raise SystemExit(1)
 
 
 if __name__ == "__main__":

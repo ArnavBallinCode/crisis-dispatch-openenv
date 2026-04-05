@@ -32,16 +32,12 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             pyproject.toml
-            crisis-dispatch-env/requirements.txt
-            crisis-dispatch-env/pyproject.toml
 
       - name: Detect project directory
         id: project-dir
         run: |
           if [ -f "pyproject.toml" ] && [ -d "app" ] && [ -f "inference.py" ]; then
             echo "dir=." >> "$GITHUB_OUTPUT"
-          elif [ -f "crisis-dispatch-env/pyproject.toml" ] && [ -d "crisis-dispatch-env/app" ] && [ -f "crisis-dispatch-env/inference.py" ]; then
-            echo "dir=crisis-dispatch-env" >> "$GITHUB_OUTPUT"
           else
             echo "Unable to find project root containing pyproject.toml, app/, and inference.py"
             exit 1

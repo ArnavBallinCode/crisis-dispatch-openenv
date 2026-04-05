@@ -5,118 +5,161 @@ colorFrom: red
 colorTo: blue
 sdk: docker
 app_port: 7860
+tags:
+  - openenv
 pinned: false
 ---
 
 # Crisis Resource Dispatch Environment
 
-A deterministic OpenEnv environment for crisis resource dispatch.
+A deterministic OpenEnv environment simulating real-world emergency dispatch operations.
 
-This project simulates real emergency decision-making with limited responders, travel-time constraints, severity escalation, and multi-agency coordination.
+An agent must manage a limited fleet of emergency units (ambulances, fire trucks, police) across a city grid, responding to incidents with varying severity, time constraints, and resource requirements.
 
-## Start Here
+## Environment Description
 
-- Overview and quick commands: `README.md`
-- Detailed docs index: `docs/README.md`
-- Challenge mapping and deep environment mechanics:
-  - `docs/CHALLENGE_ALIGNMENT_AND_ENVIRONMENT.md`
-- Beginner setup and usage:
-  - `docs/BEGINNER_GUIDE.md`
-- Hugging Face deployment and stuck-build troubleshooting:
-  - `docs/DEPLOYMENT_HF_SPACE.md`
+**Domain**: Emergency response dispatch planning  
+**Task type**: Sequential decision making under resource constraints  
+**Reward type**: Dense (step-level signals throughout the episode)
 
-## Quick Commands
+The environment models the real challenge dispatchers face: prioritizing which incidents to respond to first, routing the right unit types, managing travel time, and handling incident escalation when responses are delayed.
 
-Install:
+## Action Space
+
+Each step the agent submits one of:
+
+| Action | Description |
+|--------|-------------|
+| `Action(unit_id="A1", incident_id="E-MED-1")` | Dispatch unit to incident |
+| `Action()` (both null) | Wait — no dispatch this step |
+
+## Observation Space
+
+The `Observation` model returned by `reset()` and `step()` includes:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `task_id` | `str` | Active task name |
+| `step_count` | `int` | Steps taken so far |
+| `max_steps` | `int` | Episode step limit |
+| `units` | `List[UnitState]` | Fleet status (position, availability, target) |
+| `incidents` | `List[IncidentState]` | Active incidents (severity, elapsed, responding units) |
+| `metrics` | `EnvironmentMetrics` | Running dispatch accuracy, resolution counts |
+| `done` | `bool` | Whether the episode has ended |
+| `cumulative_reward` | `float` | Total reward so far |
+
+## Tasks
+
+| Task ID | Difficulty | Description | Max Steps |
+|---------|-----------|-------------|-----------|
+| `easy` | Easy | One critical medical incident, 3 units, 6×6 grid | 18 |
+| `medium` | Medium | 4 incidents, 4 units, 8×8 grid, resource contention | 30 |
+| `hard` | Hard | 5 incidents, 6 units, 10×10 grid, multi-agency coordination required | 40 |
+
+## Reward Function
+
+Step-level rewards provide dense signal throughout the episode:
+
+- **+dispatch bonus** (`+0.05–0.14`): Correct unit type dispatched to valid incident
+- **-wait penalty** (`-0.02`): Each step with no dispatch
+- **+resolution reward** (`+1.0–3.0 × timeliness factor`): Incident resolved by responding unit; scaled by `initial_severity` (not current — prevents escalation farming)
+- **-wrong dispatch** (`-0.35`): Wrong unit type for incident
+- **-unit unavailable** (`-0.35`): Dispatching busy unit
+- **-escalation penalty** (`-0.09 per step`): Active critical incident unresolved
+- **-failure penalty** (`-1.1–3.6`): Incident exceeds `max_wait` without resolution
+- **-critical failure** (`-5.0`): Critical incident expires
+
+## Baseline Scores (Heuristic Policy)
+
+| Task | Score | Steps |
+|------|-------|-------|
+| easy | 0.932 | 3 |
+| medium | 0.927 | 4 |
+| hard | 0.752 | 8 |
+
+Scores are deterministic and reproducible. Run:
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env
+uv run inference.py --mode heuristic --task all
 ```
 
-Run API:
+## Setup & Usage
+
+### Install
 
 ```bash
-uvicorn app.main:app --app-dir . --host 0.0.0.0 --port 7860
+uv venv --python 3.12 .venv
+uv pip install -r requirements.txt
 ```
 
-Run deterministic baseline:
+### Run API Server
 
 ```bash
-python inference.py --mode heuristic --task all --check-determinism
+uv run -m uvicorn app.main:app --host 0.0.0.0 --port 7860
 ```
 
-Run tests:
+### Run Baseline Inference
 
 ```bash
-pip install pytest
-pytest -q
+uv run inference.py --mode heuristic --task all
 ```
 
-Run OpenAI-compatible provider baseline (OpenAI or Groq endpoint):
+### Run Tests
 
 ```bash
-python inference.py --mode openai --task easy --episodes 1
+uv run -m pytest tests/ -v
 ```
 
-Docker build/run:
+### Validate OpenEnv Compliance
+
+```bash
+uvx --from "openenv-core[cli]" openenv validate
+```
+
+### Docker Build & Run
 
 ```bash
 docker build -t crisis-dispatch-env .
 docker run --rm -p 7860:7860 crisis-dispatch-env
 ```
 
-## Current Space
+## API Endpoints
 
-- Repo: `https://huggingface.co/spaces/blackmamba2408/Crisis-Dispatch-OpenEnv`
-- Host: `https://blackmamba2408-crisis-dispatch-openenv.hf.space`
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/reset` | `POST` | Start new episode |
+| `/step` | `POST` | Submit an action |
+| `/state` | `GET` | Current environment state |
+| `/tasks` | `GET` | List all available tasks |
+| `/grader` | `GET` | Score the current episode |
+| `/baseline` | `GET` | Run heuristic baseline on easy task |
+| `/health` | `GET` | Health check |
 
-## CI + Auto Sync Pipeline
+## Environment Variables
 
-This repository now includes a GitHub Actions workflow at
-`.github/workflows/ci-hf-sync.yml`.
-
-Pipeline behavior:
-
-1. Runs on pull requests to `main`, pushes to `main`, and manual `workflow_dispatch`.
-2. Installs dependencies and runs `pytest -q`.
-3. Runs a deterministic baseline check:
-   `python inference.py --mode heuristic --task all --check-determinism`.
-4. If tests pass on `main`, pushes the latest commit to your Hugging Face Space.
-
-Required GitHub repository secrets:
-
-- `HF_TOKEN`: Hugging Face token with write access to the target Space.
-- `HF_SPACE_ID`: Space id in `owner/space-name` format.
-  Example: `blackmamba2408/Crisis-Dispatch-OpenEnv`.
-
-Notes:
-
-- The sync job is blocked unless test checks pass.
-- Pull requests run validation only (no Space sync).
-- Deployment uses git push to Hugging Face so the Space reflects the latest
-  repository state.
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `HF_TOKEN` | Yes (for LLM mode) | Hugging Face API token |
+| `API_BASE_URL` | No | LLM endpoint (default: HF router) |
+| `MODEL_NAME` | No | Model identifier (default: Qwen/Qwen2.5-72B-Instruct) |
 
 ## Project Layout
 
 ```text
-crisis-dispatch-env/
-├── .dockerignore
-├── .env.example
-├── .gitignore
+crisis-dispatch-openenv/
 ├── Dockerfile
 ├── README.md
-├── docs/
-│   ├── README.md
-│   ├── BEGINNER_GUIDE.md
-│   ├── CHALLENGE_ALIGNMENT_AND_ENVIRONMENT.md
-│   └── DEPLOYMENT_HF_SPACE.md
-├── inference.py
 ├── openenv.yaml
 ├── requirements.txt
+├── inference.py
 └── app/
-    ├── environment.py
-    ├── main.py
-    ├── models.py
-    └── tasks.py
+    ├── environment.py   ← Core simulation (step/reset/state/close)
+    ├── main.py          ← FastAPI server + all endpoints
+    ├── models.py        ← Typed models: Action, Observation, Reward
+    └── tasks.py         ← Task definitions + deterministic grader
 ```
+
+## HF Space
+
+- Space: `https://huggingface.co/spaces/blackmamba2408/Crisis-Dispatch-OpenEnv`
+- Host: `https://blackmamba2408-crisis-dispatch-openenv.hf.space`

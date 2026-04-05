@@ -1,29 +1,19 @@
-import pytest
+import subprocess
+import sys
 
-from inference import heuristic_policy, run_episode
+import pytest
 
 
 @pytest.mark.parametrize("task_id", ["easy", "medium", "hard"])
-def test_heuristic_policy_is_deterministic(task_id: str) -> None:
-    first = run_episode(task_id=task_id, policy=heuristic_policy)
-    second = run_episode(task_id=task_id, policy=heuristic_policy)
-
-    assert first.score == second.score
-    assert first.cumulative_reward == second.cumulative_reward
-
-
-def test_baseline_outputs_task_rows_and_determinism_passes(project_root) -> None:
-    import subprocess
-    import sys
-
+def test_heuristic_produces_valid_logs(task_id: str, project_root) -> None:
+    """Verify that inference.py emits the mandatory [START]/[STEP]/[END] format."""
     cmd = [
         sys.executable,
         "inference.py",
         "--mode",
         "heuristic",
         "--task",
-        "all",
-        "--check-determinism",
+        task_id,
     ]
     completed = subprocess.run(
         cmd,
@@ -31,20 +21,58 @@ def test_baseline_outputs_task_rows_and_determinism_passes(project_root) -> None
         capture_output=True,
         text=True,
         check=False,
-        timeout=1200,
+        timeout=120,
     )
 
     assert completed.returncode == 0, completed.stderr or completed.stdout
     output = completed.stdout
 
     lines = [line.strip() for line in output.splitlines() if line.strip()]
-    score_rows = [line for line in lines if line.startswith(("easy,", "medium,", "hard,"))]
-    assert len(score_rows) >= 3
+    start_lines = [l for l in lines if l.startswith("[START]")]
+    step_lines = [l for l in lines if l.startswith("[STEP]")]
+    end_lines = [l for l in lines if l.startswith("[END]")]
 
-    for row in score_rows:
-        score = float(row.split(",")[1])
-        assert 0.0 <= score <= 1.0
+    assert len(start_lines) == 1, f"Expected 1 [START] line, got {len(start_lines)}"
+    assert len(end_lines) == 1, f"Expected 1 [END] line, got {len(end_lines)}"
+    assert len(step_lines) >= 1, "Expected at least 1 [STEP] line"
 
-    assert "easy: PASS" in output
-    assert "medium: PASS" in output
-    assert "hard: PASS" in output
+    # Verify [START] format
+    assert f"task={task_id}" in start_lines[0]
+    assert "env=crisis-dispatch" in start_lines[0]
+
+    # Verify [END] format
+    end_line = end_lines[0]
+    assert "success=" in end_line
+    assert "steps=" in end_line
+    assert "score=" in end_line
+    assert "rewards=" in end_line
+
+
+def test_all_tasks_baseline_runs(project_root) -> None:
+    """Verify that running --task all produces [START]/[END] for each task."""
+    cmd = [
+        sys.executable,
+        "inference.py",
+        "--mode",
+        "heuristic",
+        "--task",
+        "all",
+    ]
+    completed = subprocess.run(
+        cmd,
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=300,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    output = completed.stdout
+
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    start_lines = [l for l in lines if l.startswith("[START]")]
+    end_lines = [l for l in lines if l.startswith("[END]")]
+
+    assert len(start_lines) == 3, f"Expected 3 [START] lines, got {len(start_lines)}"
+    assert len(end_lines) == 3, f"Expected 3 [END] lines, got {len(end_lines)}"

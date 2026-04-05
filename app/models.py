@@ -98,7 +98,13 @@ class EnvironmentMetrics(BaseModel):
     response_times: Dict[str, int] = Field(default_factory=dict)
 
 
-class EnvironmentState(BaseModel):
+# ---------------------------------------------------------------------------
+# OpenEnv-mandated model names: Observation, Action, Reward
+# ---------------------------------------------------------------------------
+
+
+class Observation(BaseModel):
+    """The typed Observation returned from reset()/step()."""
     task_id: str
     task_name: str
     difficulty: Literal["easy", "medium", "hard"]
@@ -113,15 +119,30 @@ class EnvironmentState(BaseModel):
     metrics: EnvironmentMetrics
 
 
-class DispatchAction(BaseModel):
+# Backward compatibility alias used internally
+EnvironmentState = Observation
+
+
+class Action(BaseModel):
+    """The typed Action accepted by step()."""
     unit_id: Optional[str] = None
     incident_id: Optional[str] = None
 
     @model_validator(mode="after")
-    def validate_pair(self) -> "DispatchAction":
+    def validate_pair(self) -> "Action":
         if (self.unit_id is None) != (self.incident_id is None):
             raise ValueError("unit_id and incident_id must be both provided or both omitted for wait")
         return self
+
+
+# Backward compatibility alias
+DispatchAction = Action
+
+
+class Reward(BaseModel):
+    """Typed Reward model as required by OpenEnv spec."""
+    value: float = 0.0
+    message: str = ""
 
 
 class GradeResult(BaseModel):
@@ -133,11 +154,12 @@ class GradeResult(BaseModel):
 
 
 class StepResult(BaseModel):
-    state: EnvironmentState
+    observation: Observation
     reward: float
     done: bool
     score: Optional[float] = None
     message: str = ""
+    info: Dict = Field(default_factory=dict)
 
 
 class TaskSummary(BaseModel):

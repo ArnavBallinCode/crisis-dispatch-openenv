@@ -37,15 +37,15 @@ def test_local_reset_and_tasks_contract() -> None:
 def test_local_step_and_score_contract() -> None:
     reset_response = client.post("/reset/easy")
     assert reset_response.status_code == 200
-    assert reset_response.json()["task_id"] == "easy"
+    assert reset_response.json()["observation"]["task_id"] == "easy"
 
     step_response = client.post("/step", json={})
     assert step_response.status_code == 200
     step_payload = step_response.json()
-    assert "state" in step_payload
+    assert "observation" in step_payload
     assert "reward" in step_payload
 
-    score_response = client.get("/score")
+    score_response = client.get("/grader")
     assert score_response.status_code == 200
     score_payload = score_response.json()
     assert score_payload["task_id"] == "easy"
