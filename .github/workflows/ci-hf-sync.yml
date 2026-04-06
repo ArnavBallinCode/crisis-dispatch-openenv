@@ -55,9 +55,13 @@ jobs:
         working-directory: ${{ steps.project-dir.outputs.dir }}
         run: python -m pytest -q
 
-      - name: Run deterministic baseline check
+      - name: Run LLM baseline validation
         working-directory: ${{ steps.project-dir.outputs.dir }}
-        run: python inference.py --mode heuristic --task all --check-determinism
+        env:
+          HF_TOKEN: ${{ secrets.INFERENCE_API_KEY }}  # Repo secret storing Groq/HF token
+          API_BASE_URL: "https://api.groq.com/openai/v1"
+          MODEL_NAME: "llama-3.3-70b-versatile"
+        run: python inference.py --mode openai --task easy
 
   sync-to-hf:
     name: Sync to Hugging Face Space

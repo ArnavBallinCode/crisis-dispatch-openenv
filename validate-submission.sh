@@ -157,14 +157,21 @@ fi
 
 log "${BOLD}Step 3/3: Running openenv validate${NC} ..."
 
-if ! command -v openenv &>/dev/null; then
-  fail "openenv command not found"
-  hint "Install it: pip install openenv-core"
+if ! command -v uvx &>/dev/null; then
+  fail "uvx command not found"
+  hint "Ensure uv is properly installed"
   stop_at "Step 3"
 fi
 
+if [ -f "$REPO_DIR/.env" ]; then
+  log "  Sourcing local .env file to inject LLM credentials for validation test..."
+  set -a
+  source "$REPO_DIR/.env"
+  set +a
+fi
+
 VALIDATE_OK=false
-VALIDATE_OUTPUT=$(cd "$REPO_DIR" && openenv validate 2>&1) && VALIDATE_OK=true
+VALIDATE_OUTPUT=$(cd "$REPO_DIR" && uvx --from "openenv-core>=0.2.0" openenv validate 2>&1) && VALIDATE_OK=true
 
 if [ "$VALIDATE_OK" = true ]; then
   pass "openenv validate passed"
