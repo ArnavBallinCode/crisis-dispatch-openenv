@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover
 
 from app.environment import CrisisDispatchEnvironment
 from app.models import Action, Observation, Severity
+from app.baseline import heuristic_policy, random_policy
 
 
 if load_dotenv is not None:
@@ -137,394 +138,7 @@ def travel_distance(unit_x: int, unit_y: int, incident_x: int, incident_y: int) 
 # ---------------------------------------------------------------------------
 
 
-def heuristic_policy(state: Observation) -> Action:
-    incidents = active_incidents(state)
-    units = available_units(state)
-
-    if not incidents or not units:
-        return Action()
-
-    incident_lookup = {incident.id: incident for incident in state.incidents}
-
-    def min_eta_for_type(unit_type, incident) -> int:
-        best = 10**9
-        for unit in state.units:
-            if unit.unit_type != unit_type:
-                continue
-
-            if unit.status.value == "available":
-                eta = travel_distance(
-                    unit.position.x,
-                    unit.position.y,
-                    incident.position.x,
-                    incident.position.y,
-                )
-            else:
-                target = incident_lookup.get(unit.target_incident_id or "")
-                if target is None:
-                    continue
-                eta = unit.travel_remaining + 1 + travel_distance(
-                    target.position.x,
-                    target.position.y,
-                    incident.position.x,
-                    incident.position.y,
-                )
-
-            if eta < best:
-                best = eta
-        return best
-
-    incident_info = {}
-    for incident in incidents:
-        required = set(incident.required_units)
-        responding = set(incident.responding_units)
-        planned = set(responding)
-        for unit in state.units:
-            if unit.target_incident_id == incident.id:
-                planned.add(unit.unit_type)
-
-        missing = required - planned
-        slack = incident.max_wait - incident.elapsed
-        doomed = any(min_eta_for_type(needed_type, incident) > slack for needed_type in missing)
-
-        incident_info[incident.id] = {
-            "incident": incident,
-            "missing": missing,
-            "slack": slack,
-            "doomed": doomed,
-        }
-
-    forced_candidates = []
-    for incident in incidents:
-        info = incident_info[incident.id]
-        missing = info["missing"]
-        slack = info["slack"]
-
-        if incident.initial_severity != Severity.CRITICAL:
-            continue
-        if not missing:
-            continue
-
-        for needed_type in missing:
-            feasible_units = [
-                unit
-                for unit in units
-                if unit.unit_type == needed_type
-                and travel_distance(
-                    unit.position.x,
-                    unit.position.y,
-                    incident.position.x,
-                    incident.position.y,
-                )
-                <= slack
-            ]
-
-            if len(feasible_units) == 1:
-                chosen = feasible_units[0]
-                distance = travel_distance(
-                    chosen.position.x,
-                    chosen.position.y,
-                    incident.position.x,
-                    incident.position.y,
-                )
-                margin = slack - distance
-                forced_candidates.append((margin, distance, chosen.id, incident.id))
-
-    if forced_candidates:
-        _, _, unit_id, incident_id = min(forced_candidates)
-        return Action(unit_id=unit_id, incident_id=incident_id)
-
-    severity_weight = {
-        Severity.LOW: 1.0,
-        Severity.MEDIUM: 2.5,
-        Severity.CRITICAL: 5.0,
-    }
-
-    def reservation_penalty(unit, chosen_incident_id: str) -> float:
-        penalty = 0.0
-        for info in incident_info.values():
-            incident = info["incident"]
-            if incident.id == chosen_incident_id or info["doomed"]:
-                continue
-            if unit.unit_type not in info["missing"]:
-                continue
-
-            unit_distance = travel_distance(
-                unit.position.x,
-                unit.position.y,
-                incident.position.x,
-                incident.position.y,
-            )
-            if unit_distance > info["slack"]:
-                continue
-
-            feasible_units = [
-                candidate
-                for candidate in units
-                if candidate.unit_type == unit.unit_type
-                and travel_distance(
-                    candidate.position.x,
-                    candidate.position.y,
-                    incident.position.x,
-                    incident.position.y,
-                )
-                <= info["slack"]
-            ]
-            if len(feasible_units) == 1 and feasible_units[0].id == unit.id:
-                if incident.initial_severity == Severity.CRITICAL:
-                    penalty += 8.0
-                elif incident.initial_severity == Severity.MEDIUM:
-                    penalty += 3.0
-                else:
-                    penalty += 1.2
-
-        return penalty
-
-    best_score = float("-inf")
-    best_action = Action()
-
-    for info in incident_info.values():
-        incident = info["incident"]
-        missing = info["missing"]
-        slack = info["slack"]
-
-        if not missing or info["doomed"]:
-            continue
-
-        urgency = incident.elapsed / max(1, incident.max_wait)
-        deadline_pressure = 4.0 / max(1, slack)
-        completion_bonus = 2.0 if len(missing) == 1 else 0.0
-        first_response_bonus = 1.5 if incident.first_response_step is None else 0.0
-
-        incident_priority = (
-            5.0 * severity_weight[incident.initial_severity]
-            + 2.5 * urgency
-            + deadline_pressure
-            + completion_bonus
-            + first_response_bonus
-        )
-
-        for unit in units:
-            if unit.unit_type not in missing:
-                continue
-
-            distance = travel_distance(
-                unit.position.x,
-                unit.position.y,
-                incident.position.x,
-                incident.position.y,
-            )
-            if distance > slack:
-                continue
-
-            score = (
-                incident_priority
-                - 1.3 * distance
-                - reservation_penalty(unit, incident.id)
-            )
-
-            if score > best_score:
-                best_score = score
-                best_action = Action(unit_id=unit.id, incident_id=incident.id)
-
-    return best_action
-
-
-def random_policy(state: Observation, rng: random.Random) -> Action:
-    incidents = active_incidents(state)
-    units = available_units(state)
-
-    if not incidents or not units:
-        return Action()
-
-    if rng.random() < 0.15:
-        return Action()
-
-    unit = rng.choice(units)
-    incident = rng.choice(incidents)
-    return Action(unit_id=unit.id, incident_id=incident.id)
-
-
-def build_llm_backends() -> List[LLMBackend]:
-    backends: List[LLMBackend] = []
-    seen = set()
-
-    def add_backend(name: str, api_key: Optional[str], base_url: Optional[str], model: Optional[str]) -> None:
-        if not api_key or not base_url or not model:
-            return
-        signature = (api_key, base_url, model)
-        if signature in seen:
-            return
-        seen.add(signature)
-        backends.append(LLMBackend(name=name, api_key=api_key, base_url=base_url, model=model))
-
-    add_backend("primary", API_KEY, API_BASE_URL, MODEL_NAME)
-    add_backend("hf_router", HF_TOKEN, "https://router.huggingface.co/v1", HF_MODEL_NAME)
-    add_backend("openai", OPENAI_API_KEY, os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1", OPENAI_MODEL_NAME)
-    add_backend("groq", GROQ_API_KEY, os.getenv("GROQ_BASE_URL") or "https://api.groq.com/openai/v1", GROQ_MODEL_NAME)
-    return backends
-
-
-def probe_backend(backend: LLMBackend) -> Tuple[bool, str]:
-    client = OpenAI(api_key=backend.api_key, base_url=backend.base_url)
-    try:
-        client.chat.completions.create(
-            model=backend.model,
-            temperature=0,
-            max_tokens=12,
-            messages=[
-                {"role": "system", "content": "Return exactly JSON: {\"unit_id\": null, \"incident_id\": null}."},
-                {"role": "user", "content": "ping"},
-            ],
-        )
-        return True, "ok"
-    except Exception as exc:
-        return False, f"{type(exc).__name__}: {str(exc)[:180]}"
-
-
-def resolve_llm_backend() -> Tuple[LLMBackend, OpenAI]:
-    backends = build_llm_backends()
-    if not backends:
-        raise RuntimeError("No LLM backend configured. Set HF_TOKEN or API_KEY (or provider-specific key).")
-
-    failures: List[str] = []
-    for backend in backends:
-        ok, details = probe_backend(backend)
-        if ok:
-            client = OpenAI(api_key=backend.api_key, base_url=backend.base_url)
-            return backend, client
-        failures.append(f"{backend.name} ({backend.base_url}, model={backend.model}): {details}")
-
-    joined = " | ".join(failures)
-    raise RuntimeError(f"All configured LLM backends failed authentication/probe: {joined}")
-
-
-def action_to_string(action: Action) -> str:
-    if action.unit_id and action.incident_id:
-        return f"dispatch({action.unit_id},{action.incident_id})"
-    return "wait()"
-
-
-def lookup_action_entities(state: Observation, action: Action):
-    if not action.unit_id or not action.incident_id:
-        return None, None
-    unit = next((u for u in state.units if u.id == action.unit_id), None)
-    incident = next((i for i in state.incidents if i.id == action.incident_id), None)
-    return unit, incident
-
-
-def is_required_unit_dispatch(state: Observation, action: Action) -> bool:
-    if action.unit_id is None and action.incident_id is None:
-        return True
-
-    unit, incident = lookup_action_entities(state, action)
-    if unit is None or incident is None:
-        return False
-    return unit.unit_type in incident.required_units
-
-
-def build_llm_user_prompt(state: Observation, history: List[str]) -> str:
-    available = [
-        {
-            "id": unit.id,
-            "unit_type": unit.unit_type.value,
-            "x": unit.position.x,
-            "y": unit.position.y,
-        }
-        for unit in available_units(state)
-    ]
-
-    active = [
-        {
-            "id": incident.id,
-            "incident_type": incident.incident_type.value,
-            "severity": incident.severity.value,
-            "initial_severity": incident.initial_severity.value,
-            "required_units": [u.value for u in incident.required_units],
-            "responding_units": [u.value for u in incident.responding_units],
-            "x": incident.position.x,
-            "y": incident.position.y,
-            "elapsed": incident.elapsed,
-            "max_wait": incident.max_wait,
-            "time_remaining": max(0, incident.max_wait - incident.elapsed),
-        }
-        for incident in active_incidents(state)
-    ]
-
-    payload = {
-        "task": state.task_id,
-        "step": state.step_count,
-        "max_steps": state.max_steps,
-        "cumulative_reward": round(state.cumulative_reward, 4),
-        "metrics": {
-            "total_dispatches": state.metrics.total_dispatches,
-            "correct_dispatches": state.metrics.correct_dispatches,
-            "wrong_dispatches": state.metrics.wrong_dispatches,
-            "incidents_resolved": state.metrics.incidents_resolved,
-            "incidents_failed": state.metrics.incidents_failed,
-            "unresolved_critical": state.metrics.unresolved_critical,
-        },
-        "available_units": available,
-        "active_incidents": active,
-        "recent_history": history[-LLM_HISTORY_WINDOW:] if history else [],
-        "output_schema": {"unit_id": "string|null", "incident_id": "string|null"},
-    }
-    return json.dumps(payload, separators=(",", ":"))
-
-
-def parse_llm_action(text: str) -> Optional[Action]:
-    candidates = [text.strip()]
-
-    if "```" in text:
-        stripped = "\n".join(
-            line for line in text.splitlines() if not line.strip().startswith("```")
-        ).strip()
-        if stripped and stripped not in candidates:
-            candidates.append(stripped)
-
-    json_match = re.search(r"\{.*\}", text, re.DOTALL)
-    if json_match:
-        json_block = json_match.group(0).strip()
-        if json_block not in candidates:
-            candidates.append(json_block)
-
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            payload = json.loads(candidate)
-        except Exception:
-            continue
-
-        unit_id = payload.get("unit_id")
-        incident_id = payload.get("incident_id")
-
-        if isinstance(unit_id, str) and unit_id.strip().lower() in {"", "null", "none"}:
-            unit_id = None
-        if isinstance(incident_id, str) and incident_id.strip().lower() in {"", "null", "none"}:
-            incident_id = None
-
-        try:
-            return Action(unit_id=unit_id, incident_id=incident_id)
-        except Exception:
-            continue
-
-    return None
-
-
-def is_valid_action_for_state(action: Action, state: Observation) -> bool:
-    if action.unit_id is None and action.incident_id is None:
-        return True
-
-    if not action.unit_id or not action.incident_id:
-        return False
-
-    available_unit_ids = {unit.id for unit in available_units(state)}
-    active_incident_ids = {incident.id for incident in active_incidents(state)}
-    return action.unit_id in available_unit_ids and action.incident_id in active_incident_ids
-
-
-def llm_policy(state: Observation, client: OpenAI, model: str, history: List[str]) -> Action:
+def llm_policy(state: Observation, client: OpenAI, model: str) -> Action:
     incidents = active_incidents(state)
     units = available_units(state)
     if not incidents or not units:
@@ -540,6 +154,10 @@ def llm_policy(state: Observation, client: OpenAI, model: str, history: List[str
         if len(history) > LLM_HISTORY_WINDOW:
             del history[:-LLM_HISTORY_WINDOW]
 
+    extra_kwargs = {}
+    if API_BASE_URL and "nvidia.com" in API_BASE_URL.lower():
+        extra_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": True}}
+
     try:
         completion = client.chat.completions.create(
             model=model,
@@ -549,51 +167,39 @@ def llm_policy(state: Observation, client: OpenAI, model: str, history: List[str
                 {"role": "system", "content": LLM_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
+            max_tokens=1000,
+            **extra_kwargs,
         )
         text = (
             completion.choices[0].message.content.strip()
             if completion.choices and completion.choices[0].message.content
             else ""
         )
-    except Exception as exc:
-        fallback = heuristic_policy(state)
-        remember(raw=f"error={type(exc).__name__}", action=fallback, source="heuristic_fallback")
-        return fallback
+        print(f"    [LLM DEBUG] Raw JSON from {model}: {text}", flush=True)
+    except Exception as e:
+        print(f"    [LLM ERROR] Exception during call: {e} -> Falling back to heuristic", flush=True)
+        return heuristic_policy(state)
 
     if not text:
-        fallback = heuristic_policy(state)
-        remember(raw="empty_response", action=fallback, source="heuristic_fallback")
-        return fallback
+        return heuristic_policy(state)
+        
+    # Strip markdown codeblocks defensively to ensure parsing works
+    clean_text = text.strip()
+    if clean_text.startswith("```json"):
+        clean_text = clean_text[7:].strip()
+    elif clean_text.startswith("```"):
+        clean_text = clean_text[3:].strip()
+    if clean_text.endswith("```"):
+        clean_text = clean_text[:-3].strip()
 
-    action = parse_llm_action(text)
-    if action is None:
-        fallback = heuristic_policy(state)
-        remember(raw=text, action=fallback, source="heuristic_fallback")
-        return fallback
-
-    if not is_valid_action_for_state(action, state):
-        fallback = heuristic_policy(state)
-        remember(raw=text, action=fallback, source="heuristic_fallback")
-        return fallback
-
-    remember(raw=text, action=action, source="llm")
-
-    return action
-
-
-def hybrid_llm_policy(state: Observation, client: OpenAI, model: str, history: List[str]) -> Action:
-    llm_action = llm_policy(state, client, model, history)
-    heuristic_action = heuristic_policy(state)
-
-    # Guardrail 1: avoid losing a strong dispatch opportunity by waiting.
-    if llm_action.unit_id is None and heuristic_action.unit_id is not None:
-        return heuristic_action
-
-    # Guardrail 2: only accept dispatches with a required unit type.
-    if not is_required_unit_dispatch(state, llm_action):
-        return heuristic_action
-
-    return llm_action
+    try:
+        payload = json.loads(clean_text)
+        return Action(
+            unit_id=payload.get("unit_id"),
+            incident_id=payload.get("incident_id"),
+        )
+    except Exception:
+        return heuristic_policy(state)
 
 
 # ---------------------------------------------------------------------------
