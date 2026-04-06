@@ -4,9 +4,10 @@ import argparse
 import json
 import os
 import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from openai import OpenAI
 
@@ -29,13 +30,57 @@ if load_dotenv is not None:
 
 # Required/optional envs expected by the submission checklist.
 HF_TOKEN = os.getenv("HF_TOKEN")
-API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+# Canonical variables are HF_TOKEN/API_BASE_URL/MODEL_NAME. Aliases are
+# accepted for local provider compatibility without changing submission config.
+API_BASE_URL = (
+    os.getenv("API_BASE_URL")
+    or os.getenv("OPENAI_BASE_URL")
+    or os.getenv("GROQ_BASE_URL")
+    or "https://router.huggingface.co/v1"
+)
+MODEL_NAME = (
+    os.getenv("MODEL_NAME")
+    or os.getenv("OPENAI_MODEL")
+    or os.getenv("GROQ_MODEL")
+    or "Qwen/Qwen2.5-72B-Instruct"
+)
+HF_MODEL_NAME = os.getenv("HF_MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
+OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
+GROQ_MODEL_NAME = os.getenv("GROQ_MODEL") or "llama-3.1-8b-instant"
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE") or "0.0")
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS") or "220")
+LLM_HISTORY_WINDOW = int(os.getenv("LLM_HISTORY_WINDOW") or "8")
 
 # Backward-compatible key alias for local/provider flexibility.
-API_KEY = HF_TOKEN or os.getenv("API_KEY")
+API_KEY = (
+    HF_TOKEN
+    or os.getenv("API_KEY")
+    or OPENAI_API_KEY
+    or GROQ_API_KEY
+)
 ENV_NAME = "crisis-dispatch"
+
+
+LLM_SYSTEM_PROMPT = (
+    "You are dispatching emergency units. Return strict JSON only with keys unit_id and "
+    "incident_id; use null for both to wait. "
+    "Decision algorithm: prioritize preventing critical timeouts, then satisfy missing required "
+    "unit types, then choose the nearest feasible unit (distance <= max_wait - elapsed). "
+    "Never dispatch a unit type not required by the chosen incident. "
+    "No prose, markdown, or extra keys."
+)
+
+
+@dataclass(frozen=True)
+class LLMBackend:
+    name: str
+    api_key: str
+    base_url: str
+    model: str
 
 
 # ---------------------------------------------------------------------------
@@ -300,50 +345,208 @@ def random_policy(state: Observation, rng: random.Random) -> Action:
     return Action(unit_id=unit.id, incident_id=incident.id)
 
 
-def llm_policy(state: Observation, client: OpenAI, model: str) -> Action:
+def build_llm_backends() -> List[LLMBackend]:
+    backends: List[LLMBackend] = []
+    seen = set()
+
+    def add_backend(name: str, api_key: Optional[str], base_url: Optional[str], model: Optional[str]) -> None:
+        if not api_key or not base_url or not model:
+            return
+        signature = (api_key, base_url, model)
+        if signature in seen:
+            return
+        seen.add(signature)
+        backends.append(LLMBackend(name=name, api_key=api_key, base_url=base_url, model=model))
+
+    add_backend("primary", API_KEY, API_BASE_URL, MODEL_NAME)
+    add_backend("hf_router", HF_TOKEN, "https://router.huggingface.co/v1", HF_MODEL_NAME)
+    add_backend("openai", OPENAI_API_KEY, os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1", OPENAI_MODEL_NAME)
+    add_backend("groq", GROQ_API_KEY, os.getenv("GROQ_BASE_URL") or "https://api.groq.com/openai/v1", GROQ_MODEL_NAME)
+    return backends
+
+
+def probe_backend(backend: LLMBackend) -> Tuple[bool, str]:
+    client = OpenAI(api_key=backend.api_key, base_url=backend.base_url)
+    try:
+        client.chat.completions.create(
+            model=backend.model,
+            temperature=0,
+            max_tokens=12,
+            messages=[
+                {"role": "system", "content": "Return exactly JSON: {\"unit_id\": null, \"incident_id\": null}."},
+                {"role": "user", "content": "ping"},
+            ],
+        )
+        return True, "ok"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {str(exc)[:180]}"
+
+
+def resolve_llm_backend() -> Tuple[LLMBackend, OpenAI]:
+    backends = build_llm_backends()
+    if not backends:
+        raise RuntimeError("No LLM backend configured. Set HF_TOKEN or API_KEY (or provider-specific key).")
+
+    failures: List[str] = []
+    for backend in backends:
+        ok, details = probe_backend(backend)
+        if ok:
+            client = OpenAI(api_key=backend.api_key, base_url=backend.base_url)
+            return backend, client
+        failures.append(f"{backend.name} ({backend.base_url}, model={backend.model}): {details}")
+
+    joined = " | ".join(failures)
+    raise RuntimeError(f"All configured LLM backends failed authentication/probe: {joined}")
+
+
+def action_to_string(action: Action) -> str:
+    if action.unit_id and action.incident_id:
+        return f"dispatch({action.unit_id},{action.incident_id})"
+    return "wait()"
+
+
+def lookup_action_entities(state: Observation, action: Action):
+    if not action.unit_id or not action.incident_id:
+        return None, None
+    unit = next((u for u in state.units if u.id == action.unit_id), None)
+    incident = next((i for i in state.incidents if i.id == action.incident_id), None)
+    return unit, incident
+
+
+def is_required_unit_dispatch(state: Observation, action: Action) -> bool:
+    if action.unit_id is None and action.incident_id is None:
+        return True
+
+    unit, incident = lookup_action_entities(state, action)
+    if unit is None or incident is None:
+        return False
+    return unit.unit_type in incident.required_units
+
+
+def build_llm_user_prompt(state: Observation, history: List[str]) -> str:
+    available = [
+        {
+            "id": unit.id,
+            "unit_type": unit.unit_type.value,
+            "x": unit.position.x,
+            "y": unit.position.y,
+        }
+        for unit in available_units(state)
+    ]
+
+    active = [
+        {
+            "id": incident.id,
+            "incident_type": incident.incident_type.value,
+            "severity": incident.severity.value,
+            "initial_severity": incident.initial_severity.value,
+            "required_units": [u.value for u in incident.required_units],
+            "responding_units": [u.value for u in incident.responding_units],
+            "x": incident.position.x,
+            "y": incident.position.y,
+            "elapsed": incident.elapsed,
+            "max_wait": incident.max_wait,
+            "time_remaining": max(0, incident.max_wait - incident.elapsed),
+        }
+        for incident in active_incidents(state)
+    ]
+
+    payload = {
+        "task": state.task_id,
+        "step": state.step_count,
+        "max_steps": state.max_steps,
+        "cumulative_reward": round(state.cumulative_reward, 4),
+        "metrics": {
+            "total_dispatches": state.metrics.total_dispatches,
+            "correct_dispatches": state.metrics.correct_dispatches,
+            "wrong_dispatches": state.metrics.wrong_dispatches,
+            "incidents_resolved": state.metrics.incidents_resolved,
+            "incidents_failed": state.metrics.incidents_failed,
+            "unresolved_critical": state.metrics.unresolved_critical,
+        },
+        "available_units": available,
+        "active_incidents": active,
+        "recent_history": history[-LLM_HISTORY_WINDOW:] if history else [],
+        "output_schema": {"unit_id": "string|null", "incident_id": "string|null"},
+    }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def parse_llm_action(text: str) -> Optional[Action]:
+    candidates = [text.strip()]
+
+    if "```" in text:
+        stripped = "\n".join(
+            line for line in text.splitlines() if not line.strip().startswith("```")
+        ).strip()
+        if stripped and stripped not in candidates:
+            candidates.append(stripped)
+
+    json_match = re.search(r"\{.*\}", text, re.DOTALL)
+    if json_match:
+        json_block = json_match.group(0).strip()
+        if json_block not in candidates:
+            candidates.append(json_block)
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            continue
+
+        unit_id = payload.get("unit_id")
+        incident_id = payload.get("incident_id")
+
+        if isinstance(unit_id, str) and unit_id.strip().lower() in {"", "null", "none"}:
+            unit_id = None
+        if isinstance(incident_id, str) and incident_id.strip().lower() in {"", "null", "none"}:
+            incident_id = None
+
+        try:
+            return Action(unit_id=unit_id, incident_id=incident_id)
+        except Exception:
+            continue
+
+    return None
+
+
+def is_valid_action_for_state(action: Action, state: Observation) -> bool:
+    if action.unit_id is None and action.incident_id is None:
+        return True
+
+    if not action.unit_id or not action.incident_id:
+        return False
+
+    available_unit_ids = {unit.id for unit in available_units(state)}
+    active_incident_ids = {incident.id for incident in active_incidents(state)}
+    return action.unit_id in available_unit_ids and action.incident_id in active_incident_ids
+
+
+def llm_policy(state: Observation, client: OpenAI, model: str, history: List[str]) -> Action:
     incidents = active_incidents(state)
     units = available_units(state)
     if not incidents or not units:
         return Action()
 
-    prompt_payload = {
-        "step": state.step_count,
-        "available_units": [
-            {
-                "id": unit.id,
-                "unit_type": unit.unit_type.value,
-                "x": unit.position.x,
-                "y": unit.position.y,
-            }
-            for unit in units
-        ],
-        "active_incidents": [
-            {
-                "id": incident.id,
-                "incident_type": incident.incident_type.value,
-                "severity": incident.severity.value,
-                "required_units": [u.value for u in incident.required_units],
-                "x": incident.position.x,
-                "y": incident.position.y,
-                "elapsed": incident.elapsed,
-                "max_wait": incident.max_wait,
-            }
-            for incident in incidents
-        ],
-    }
+    user_prompt = build_llm_user_prompt(state, history)
 
-    system_prompt = (
-        "You dispatch emergency units. Return only JSON with keys unit_id and "
-        "incident_id. Use null for both keys to wait."
-    )
-    user_prompt = json.dumps(prompt_payload)
+    def remember(raw: str, action: Action, source: str) -> None:
+        compact_raw = " ".join(raw.split())[:160]
+        history.append(
+            f"step={state.step_count} source={source} action={action_to_string(action)} raw={compact_raw}"
+        )
+        if len(history) > LLM_HISTORY_WINDOW:
+            del history[:-LLM_HISTORY_WINDOW]
 
     try:
         completion = client.chat.completions.create(
             model=model,
-            temperature=0,
+            temperature=LLM_TEMPERATURE,
+            max_tokens=LLM_MAX_TOKENS,
             messages=[
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": LLM_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
         )
@@ -352,19 +555,45 @@ def llm_policy(state: Observation, client: OpenAI, model: str) -> Action:
             if completion.choices and completion.choices[0].message.content
             else ""
         )
-    except Exception:
-        return heuristic_policy(state)
+    except Exception as exc:
+        fallback = heuristic_policy(state)
+        remember(raw=f"error={type(exc).__name__}", action=fallback, source="heuristic_fallback")
+        return fallback
 
     if not text:
-        return heuristic_policy(state)
-    try:
-        payload = json.loads(text)
-        return Action(
-            unit_id=payload.get("unit_id"),
-            incident_id=payload.get("incident_id"),
-        )
-    except Exception:
-        return heuristic_policy(state)
+        fallback = heuristic_policy(state)
+        remember(raw="empty_response", action=fallback, source="heuristic_fallback")
+        return fallback
+
+    action = parse_llm_action(text)
+    if action is None:
+        fallback = heuristic_policy(state)
+        remember(raw=text, action=fallback, source="heuristic_fallback")
+        return fallback
+
+    if not is_valid_action_for_state(action, state):
+        fallback = heuristic_policy(state)
+        remember(raw=text, action=fallback, source="heuristic_fallback")
+        return fallback
+
+    remember(raw=text, action=action, source="llm")
+
+    return action
+
+
+def hybrid_llm_policy(state: Observation, client: OpenAI, model: str, history: List[str]) -> Action:
+    llm_action = llm_policy(state, client, model, history)
+    heuristic_action = heuristic_policy(state)
+
+    # Guardrail 1: avoid losing a strong dispatch opportunity by waiting.
+    if llm_action.unit_id is None and heuristic_action.unit_id is not None:
+        return heuristic_action
+
+    # Guardrail 2: only accept dispatches with a required unit type.
+    if not is_required_unit_dispatch(state, llm_action):
+        return heuristic_action
+
+    return llm_action
 
 
 # ---------------------------------------------------------------------------
@@ -404,10 +633,7 @@ def run_episode(
             action = policy(obs)
 
             # Build action string for logging
-            if action.unit_id and action.incident_id:
-                action_str = f"dispatch({action.unit_id},{action.incident_id})"
-            else:
-                action_str = "wait()"
+            action_str = action_to_string(action)
 
             result = env.step(action)
             reward = result.reward
@@ -458,7 +684,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run crisis-dispatch baseline inference")
     # Default to openai when an API key is present (spec requirement),
     # fall back to heuristic for CI/local runs without credentials.
-    default_mode = "openai" if (HF_TOKEN or os.getenv("API_KEY")) else "heuristic"
+    default_mode = "openai" if API_KEY else "heuristic"
     parser.add_argument(
         "--mode",
         choices=["heuristic", "random", "openai"],
@@ -482,6 +708,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run heuristic twice per task and verify scores are identical (CI gate)",
     )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print CSV summary after runs (disabled by default for strict stdout format)",
+    )
     return parser.parse_args()
 
 
@@ -490,6 +721,12 @@ def main() -> None:
     tasks = [args.task] if args.task != "all" else ["easy", "medium", "hard"]
 
     resolved_model = MODEL_NAME
+    resolved_client: Optional[OpenAI] = None
+
+    if args.mode == "openai":
+        backend, client = resolve_llm_backend()
+        resolved_client = client
+        resolved_model = backend.model
 
     results: List[EpisodeResult] = []
 
@@ -500,13 +737,11 @@ def main() -> None:
             rng = random.Random(args.seed)
             policy = lambda state, _rng=rng: random_policy(state, _rng)
         elif args.mode == "openai":
-            if not API_KEY:
-                raise RuntimeError(
-                    "Missing API key. Set HF_TOKEN or API_KEY environment variable."
-                )
-            client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
-            policy = lambda state, _client=client, _model=resolved_model: llm_policy(
-                state, _client, _model
+            if resolved_client is None:
+                raise RuntimeError("No working LLM backend available for --mode openai.")
+            history: List[str] = []
+            policy = lambda state, _client=resolved_client, _model=resolved_model: hybrid_llm_policy(
+                state, _client, _model, history
             )
         else:
             raise ValueError(f"Unknown mode: {args.mode}")
@@ -514,10 +749,13 @@ def main() -> None:
         result = run_episode(task_id=task_id, policy=policy, model_name=resolved_model)
         results.append(result)
 
-    # CSV summary (matches original --check-determinism output format)
-    print("task_id,score,cumulative_reward,steps,resolved,failed", flush=True)
-    for r in results:
-        print(f"{r.task_id},{r.score:.4f},{r.cumulative_reward:.4f},{r.steps},{r.resolved},{r.failed}", flush=True)
+    if args.summary:
+        print("task_id,score,cumulative_reward,steps,resolved,failed", flush=True)
+        for r in results:
+            print(
+                f"{r.task_id},{r.score:.4f},{r.cumulative_reward:.4f},{r.steps},{r.resolved},{r.failed}",
+                flush=True,
+            )
 
     # Determinism check: run heuristic a second time silently and compare
     if getattr(args, "check_determinism", False):
