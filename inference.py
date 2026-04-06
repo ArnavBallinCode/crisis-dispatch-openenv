@@ -4,9 +4,10 @@ import argparse
 import json
 import os
 import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from openai import OpenAI
 
@@ -30,13 +31,57 @@ if load_dotenv is not None:
 
 # Required/optional envs expected by the submission checklist.
 HF_TOKEN = os.getenv("HF_TOKEN")
-API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+# Canonical variables are HF_TOKEN/API_BASE_URL/MODEL_NAME. Aliases are
+# accepted for local provider compatibility without changing submission config.
+API_BASE_URL = (
+    os.getenv("API_BASE_URL")
+    or os.getenv("OPENAI_BASE_URL")
+    or os.getenv("GROQ_BASE_URL")
+    or "https://router.huggingface.co/v1"
+)
+MODEL_NAME = (
+    os.getenv("MODEL_NAME")
+    or os.getenv("OPENAI_MODEL")
+    or os.getenv("GROQ_MODEL")
+    or "Qwen/Qwen2.5-72B-Instruct"
+)
+HF_MODEL_NAME = os.getenv("HF_MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
+OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
+GROQ_MODEL_NAME = os.getenv("GROQ_MODEL") or "llama-3.1-8b-instant"
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE") or "0.0")
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS") or "220")
+LLM_HISTORY_WINDOW = int(os.getenv("LLM_HISTORY_WINDOW") or "8")
 
 # Backward-compatible key alias for local/provider flexibility.
-API_KEY = HF_TOKEN or os.getenv("API_KEY")
+API_KEY = (
+    HF_TOKEN
+    or os.getenv("API_KEY")
+    or OPENAI_API_KEY
+    or GROQ_API_KEY
+)
 ENV_NAME = "crisis-dispatch"
+
+
+LLM_SYSTEM_PROMPT = (
+    "You are dispatching emergency units. Return strict JSON only with keys unit_id and "
+    "incident_id; use null for both to wait. "
+    "Decision algorithm: prioritize preventing critical timeouts, then satisfy missing required "
+    "unit types, then choose the nearest feasible unit (distance <= max_wait - elapsed). "
+    "Never dispatch a unit type not required by the chosen incident. "
+    "No prose, markdown, or extra keys."
+)
+
+
+@dataclass(frozen=True)
+class LLMBackend:
+    name: str
+    api_key: str
+    base_url: str
+    model: str
 
 
 # ---------------------------------------------------------------------------
@@ -99,37 +144,15 @@ def llm_policy(state: Observation, client: OpenAI, model: str) -> Action:
     if not incidents or not units:
         return Action()
 
-    prompt_payload = {
-        "step": state.step_count,
-        "available_units": [
-            {
-                "id": unit.id,
-                "unit_type": unit.unit_type.value,
-                "x": unit.position.x,
-                "y": unit.position.y,
-            }
-            for unit in units
-        ],
-        "active_incidents": [
-            {
-                "id": incident.id,
-                "incident_type": incident.incident_type.value,
-                "severity": incident.severity.value,
-                "required_units": [u.value for u in incident.required_units],
-                "x": incident.position.x,
-                "y": incident.position.y,
-                "elapsed": incident.elapsed,
-                "max_wait": incident.max_wait,
-            }
-            for incident in incidents
-        ],
-    }
+    user_prompt = build_llm_user_prompt(state, history)
 
-    system_prompt = (
-        "You dispatch emergency units. Return only JSON with keys unit_id and "
-        "incident_id. Use null for both keys to wait."
-    )
-    user_prompt = json.dumps(prompt_payload)
+    def remember(raw: str, action: Action, source: str) -> None:
+        compact_raw = " ".join(raw.split())[:160]
+        history.append(
+            f"step={state.step_count} source={source} action={action_to_string(action)} raw={compact_raw}"
+        )
+        if len(history) > LLM_HISTORY_WINDOW:
+            del history[:-LLM_HISTORY_WINDOW]
 
     extra_kwargs = {}
     if API_BASE_URL and "nvidia.com" in API_BASE_URL.lower():
@@ -138,9 +161,10 @@ def llm_policy(state: Observation, client: OpenAI, model: str) -> Action:
     try:
         completion = client.chat.completions.create(
             model=model,
-            temperature=0,
+            temperature=LLM_TEMPERATURE,
+            max_tokens=LLM_MAX_TOKENS,
             messages=[
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": LLM_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=1000,
@@ -215,10 +239,7 @@ def run_episode(
             action = policy(obs)
 
             # Build action string for logging
-            if action.unit_id and action.incident_id:
-                action_str = f"dispatch({action.unit_id},{action.incident_id})"
-            else:
-                action_str = "wait()"
+            action_str = action_to_string(action)
 
             result = env.step(action)
             reward = result.reward
@@ -269,7 +290,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run crisis-dispatch baseline inference")
     # Default to openai when an API key is present (spec requirement),
     # fall back to heuristic for CI/local runs without credentials.
-    default_mode = "openai" if (HF_TOKEN or os.getenv("API_KEY")) else "heuristic"
+    default_mode = "openai" if API_KEY else "heuristic"
     parser.add_argument(
         "--mode",
         choices=["heuristic", "random", "openai"],
@@ -293,6 +314,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run heuristic twice per task and verify scores are identical (CI gate)",
     )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print CSV summary after runs (disabled by default for strict stdout format)",
+    )
     return parser.parse_args()
 
 
@@ -301,6 +327,12 @@ def main() -> None:
     tasks = [args.task] if args.task != "all" else ["easy", "medium", "hard"]
 
     resolved_model = MODEL_NAME
+    resolved_client: Optional[OpenAI] = None
+
+    if args.mode == "openai":
+        backend, client = resolve_llm_backend()
+        resolved_client = client
+        resolved_model = backend.model
 
     results: List[EpisodeResult] = []
 
@@ -311,13 +343,11 @@ def main() -> None:
             rng = random.Random(args.seed)
             policy = lambda state, _rng=rng: random_policy(state, _rng)
         elif args.mode == "openai":
-            if not API_KEY:
-                raise RuntimeError(
-                    "Missing API key. Set HF_TOKEN or API_KEY environment variable."
-                )
-            client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
-            policy = lambda state, _client=client, _model=resolved_model: llm_policy(
-                state, _client, _model
+            if resolved_client is None:
+                raise RuntimeError("No working LLM backend available for --mode openai.")
+            history: List[str] = []
+            policy = lambda state, _client=resolved_client, _model=resolved_model: hybrid_llm_policy(
+                state, _client, _model, history
             )
         else:
             raise ValueError(f"Unknown mode: {args.mode}")
@@ -325,10 +355,13 @@ def main() -> None:
         result = run_episode(task_id=task_id, policy=policy, model_name=resolved_model)
         results.append(result)
 
-    # CSV summary (matches original --check-determinism output format)
-    print("task_id,score,cumulative_reward,steps,resolved,failed", flush=True)
-    for r in results:
-        print(f"{r.task_id},{r.score:.4f},{r.cumulative_reward:.4f},{r.steps},{r.resolved},{r.failed}", flush=True)
+    if args.summary:
+        print("task_id,score,cumulative_reward,steps,resolved,failed", flush=True)
+        for r in results:
+            print(
+                f"{r.task_id},{r.score:.4f},{r.cumulative_reward:.4f},{r.steps},{r.resolved},{r.failed}",
+                flush=True,
+            )
 
     # Determinism check: run heuristic a second time silently and compare
     if getattr(args, "check_determinism", False):
