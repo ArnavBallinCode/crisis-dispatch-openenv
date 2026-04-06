@@ -1,0 +1,37 @@
+[START] task=hard env=crisis-dispatch model=qwen-3-235b-a22b-instruct-2507
+    [LLM ERROR] Exception during call: 'charmap' codec can't encode character '\u2264' in position 371: character maps to <undefined>
+[STEP] step=1 action=wait() reward=-0.32 done=false error=null
+    [LLM ERROR] Exception during call: 'charmap' codec can't encode character '\u2192' in position 643: character maps to <undefined>
+[STEP] step=2 action=wait() reward=-0.32 done=false error=null
+    [LLM ERROR] Exception during call: 'charmap' codec can't encode character '\u2192' in position 295: character maps to <undefined>
+[STEP] step=3 action=wait() reward=-0.72 done=false error=null
+    [LLM ERROR] Exception during call: 'charmap' codec can't encode character '\u2192' in position 241: character maps to <undefined>
+[STEP] step=4 action=wait() reward=-0.60 done=false error=null
+    [LLM ERROR] Exception during call: 'charmap' codec can't encode character '\u2192' in position 686: character maps to <undefined>
+[STEP] step=5 action=wait() reward=-0.43 done=false error=null
+    [LLM ERROR] Exception during call: 'charmap' codec can't encode character '\u2192' in position 494: character maps to <undefined>
+[STEP] step=6 action=wait() reward=-4.03 done=false error=null
+    [LLM ERROR] Exception during call: Error code: 429 - {'message': "We're experiencing high traffic right now! Please try again soon.", 'type': 'too_many_requests_error', 'param': 'queue', 'code': 'queue_exceeded'}
+[STEP] step=7 action=wait() reward=-3.94 done=false error=null
+    [LLM ERROR] Exception during call: Error code: 429 - {'message': "We're experiencing high traffic right now! Please try again soon.", 'type': 'too_many_requests_error', 'param': 'queue', 'code': 'queue_exceeded'}
+[STEP] step=8 action=wait() reward=-4.05 done=false error=null
+    [LLM ERROR] Exception during call: Error code: 429 - {'message': "We're experiencing high traffic right now! Please try again soon.", 'type': 'too_many_requests_error', 'param': 'queue', 'code': 'queue_exceeded'}
+[STEP] step=9 action=wait() reward=-0.20 done=false error=null
+    [LLM ERROR] Exception during call: Error code: 429 - {'message': "We're experiencing high traffic right now! Please try again soon.", 'type': 'too_many_requests_error', 'param': 'queue', 'code': 'queue_exceeded'}
+[STEP] step=10 action=wait() reward=-0.20 done=false error=null
+    [LLM DEBUG] Raw JSON from qwen-3-235b-a22b-instruct-2507: Thinking:  
+- We are at step 10/40, with two active critical incidents: H-FIRE-2 (fire, critical) and H-MED-2 (medical, critical).  
+- H-FIRE-2 has time_left = 1 and still needs a fire_truck.  
+  - Check fire trucks: F1 (distance 7), F2 (distance 1). Only F2 can reach in time (distance = 1 <= time_left = 1). So F2 must be dispatched to H-FIRE-2 immediately.  
+- H-MED-2 has time_left = 2 and needs an ambulance.  
+  - Check ambulances: A1 (distance 9), A2 (distance 1). A2 can reach in time (distance = 1 <= time_left = 2). A1 cannot arrive in time (9 > 2), so only A2 is viable. Dispatch A2 to H-MED-2.  
+- Both critical incidents require immediate action and have only one viable unit each.  
+- No other units are needed (police not required for these incidents).  
+- Dispatching F2 and A2 now resolves both critical incidents in time, avoiding -0.25 penalties and gaining +0.35 each.
+
+JSON: {"dispatches": [{"unit_id": "F2", "incident_id": "H-FIRE-2"}, {"unit_id": "A2", "incident_id": "H-MED-2"}]}
+[STEP] step=11 action=dispatch(F2,H-FIRE-2) reward=1.02 done=false error=null
+[STEP] step=12 action=dispatch(A2,H-MED-2) reward=0.95 done=true error=null
+[END] success=false steps=12 score=0.051 rewards=-0.32,-0.32,-0.72,-0.60,-0.43,-4.03,-3.94,-4.05,-0.20,-0.20,1.02,0.95
+task_id,score,cumulative_reward,steps,resolved,failed
+hard,0.0510,-12.8400,12,2,3

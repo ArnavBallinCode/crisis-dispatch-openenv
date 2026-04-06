@@ -4,10 +4,9 @@ import argparse
 import json
 import os
 import random
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
 
 from openai import OpenAI
 
@@ -31,57 +30,14 @@ if load_dotenv is not None:
 
 # Required/optional envs expected by the submission checklist.
 HF_TOKEN = os.getenv("HF_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-# Canonical variables are HF_TOKEN/API_BASE_URL/MODEL_NAME. Aliases are
-# accepted for local provider compatibility without changing submission config.
-API_BASE_URL = (
-    os.getenv("API_BASE_URL")
-    or os.getenv("OPENAI_BASE_URL")
-    or os.getenv("GROQ_BASE_URL")
-    or "https://router.huggingface.co/v1"
-)
-MODEL_NAME = (
-    os.getenv("MODEL_NAME")
-    or os.getenv("OPENAI_MODEL")
-    or os.getenv("GROQ_MODEL")
-    or "Qwen/Qwen2.5-72B-Instruct"
-)
-HF_MODEL_NAME = os.getenv("HF_MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
-OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
-GROQ_MODEL_NAME = os.getenv("GROQ_MODEL") or "llama-3.1-8b-instant"
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE") or "0.0")
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS") or "220")
-LLM_HISTORY_WINDOW = int(os.getenv("LLM_HISTORY_WINDOW") or "8")
 
 # Backward-compatible key alias for local/provider flexibility.
-API_KEY = (
-    HF_TOKEN
-    or os.getenv("API_KEY")
-    or OPENAI_API_KEY
-    or GROQ_API_KEY
-)
+API_KEY = HF_TOKEN or os.getenv("API_KEY")
 ENV_NAME = "crisis-dispatch"
-
-
-LLM_SYSTEM_PROMPT = (
-    "You are dispatching emergency units. Return strict JSON only with keys unit_id and "
-    "incident_id; use null for both to wait. "
-    "Decision algorithm: prioritize preventing critical timeouts, then satisfy missing required "
-    "unit types, then choose the nearest feasible unit (distance <= max_wait - elapsed). "
-    "Never dispatch a unit type not required by the chosen incident. "
-    "No prose, markdown, or extra keys."
-)
-
-
-@dataclass(frozen=True)
-class LLMBackend:
-    name: str
-    api_key: str
-    base_url: str
-    model: str
 
 
 # ---------------------------------------------------------------------------
@@ -138,21 +94,45 @@ def travel_distance(unit_x: int, unit_y: int, incident_x: int, incident_y: int) 
 # ---------------------------------------------------------------------------
 
 
-def llm_policy(state: Observation, client: OpenAI, model: str) -> Action:
+def llm_policy(state: Observation, client: OpenAI, model: str, fallback_enabled: bool = False) -> Action:
     incidents = active_incidents(state)
     units = available_units(state)
     if not incidents or not units:
         return Action()
 
-    user_prompt = build_llm_user_prompt(state, history)
+    # Lean State for Maximum Performance
+    dist_matrix = {}
+    for unit in state.units:
+        if unit.status.value == "available":
+            dist_matrix[unit.id] = {
+                inc.id: travel_distance(unit.position.x, unit.position.y, inc.position.x, inc.position.y)
+                for inc in incidents
+            }
 
-    def remember(raw: str, action: Action, source: str) -> None:
-        compact_raw = " ".join(raw.split())[:160]
-        history.append(
-            f"step={state.step_count} source={source} action={action_to_string(action)} raw={compact_raw}"
-        )
-        if len(history) > LLM_HISTORY_WINDOW:
-            del history[:-LLM_HISTORY_WINDOW]
+    prompt_payload = {
+        "step": state.step_count,
+        "distances": dist_matrix,
+        "units": [
+            {"id": u.id, "type": u.unit_type.value, "status": u.status.value, "x": u.position.x, "y": u.position.y, "eta": u.travel_remaining}
+            for u in state.units
+        ],
+        "incidents": [
+            {
+                "id": inc.id, "type": inc.incident_type.value, "severity": inc.severity.value,
+                "missing": [r.value for r in inc.required_units if r not in inc.responding_units],
+                "time_left": max(0, inc.max_wait - inc.elapsed)
+            }
+            for inc in incidents
+        ],
+    }
+
+    system_prompt = (
+        "You are an emergency dispatcher. Return strict JSON only. "
+        "Goal: Resolve incidents before time_left hits 0. Priority: Critical > Medium > Low. \n"
+        "Format: {\"dispatches\": [{\"unit_id\": \"U1\", \"incident_id\": \"I1\"}, ...]}\n"
+        "Use {} if no moves are possible."
+    )
+    user_prompt = json.dumps(prompt_payload)
 
     extra_kwargs = {}
     if API_BASE_URL and "nvidia.com" in API_BASE_URL.lower():
@@ -162,9 +142,8 @@ def llm_policy(state: Observation, client: OpenAI, model: str) -> Action:
         completion = client.chat.completions.create(
             model=model,
             temperature=LLM_TEMPERATURE,
-            max_tokens=LLM_MAX_TOKENS,
             messages=[
-                {"role": "system", "content": LLM_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=1000,
@@ -175,16 +154,28 @@ def llm_policy(state: Observation, client: OpenAI, model: str) -> Action:
             if completion.choices and completion.choices[0].message.content
             else ""
         )
-        print(f"    [LLM DEBUG] Raw JSON from {model}: {text}", flush=True)
+        # Windows-safe print: ignore non-ascii for terminal display
+        safe_text = text.encode("ascii", "ignore").decode("ascii")
+        print(f"    [LLM DEBUG] Raw output: {safe_text}", flush=True)
     except Exception as e:
-        print(f"    [LLM ERROR] Exception during call: {e} -> Falling back to heuristic", flush=True)
-        return heuristic_policy(state)
+        print(f"    [LLM ERROR] Exception during call: {e}", flush=True)
+        if fallback_enabled:
+            print(f"    [LLM FALLBACK] Falling back to heuristic.", flush=True)
+            return [heuristic_policy(state)]
+        return [Action()]
 
     if not text:
-        return heuristic_policy(state)
+        if fallback_enabled:
+            print(f"    [LLM FALLBACK] Empty response, falling back to heuristic.", flush=True)
+            return [heuristic_policy(state)]
+        return [Action()]
         
-    # Strip markdown codeblocks defensively to ensure parsing works
+    # Strip non-JSON content gracefully (CoT might be present)
     clean_text = text.strip()
+    if "JSON:" in clean_text:
+        clean_text = clean_text.split("JSON:")[-1].strip()
+    
+    # Standard markdown stripping
     if clean_text.startswith("```json"):
         clean_text = clean_text[7:].strip()
     elif clean_text.startswith("```"):
@@ -192,14 +183,33 @@ def llm_policy(state: Observation, client: OpenAI, model: str) -> Action:
     if clean_text.endswith("```"):
         clean_text = clean_text[:-3].strip()
 
+    # Final attempt to find the outer {} if the model added prose after JSON
+    start = clean_text.find("{")
+    end = clean_text.rfind("}")
+    if start != -1 and end != -1:
+        clean_text = clean_text[start : end + 1]
+
     try:
         payload = json.loads(clean_text)
-        return Action(
-            unit_id=payload.get("unit_id"),
-            incident_id=payload.get("incident_id"),
-        )
-    except Exception:
-        return heuristic_policy(state)
+        # Support both {"unit_id": "...", "incident_id": "..."} and {"dispatches": [...]}
+        dispatches = payload.get("dispatches", [])
+        if not dispatches and "unit_id" in payload:
+            dispatches = [payload]
+            
+        actions = []
+        for d in dispatches:
+            uid = d.get("unit_id")
+            iid = d.get("incident_id")
+            if uid and iid:
+                actions.append(Action(unit_id=uid, incident_id=iid))
+        
+        return actions if actions else [Action()]
+    except Exception as e:
+        print(f"    [LLM ERROR] JSON parse failure: {e}", flush=True)
+        if fallback_enabled:
+            print(f"    [LLM FALLBACK] Falling back to heuristic.", flush=True)
+            return [heuristic_policy(state)]
+        return [Action()]
 
 
 # ---------------------------------------------------------------------------
@@ -234,14 +244,36 @@ def run_episode(
     if not silent:
         log_start(task=task_id, env=ENV_NAME, model=model_name)
 
+    action_buffer: List[Action] = []
+    known_incident_ids = {inc.id for inc in obs.incidents}
+    
     try:
         while not obs.done:
-            action = policy(obs)
+            # If buffer is empty, re-prompt the fleet policy
+            if not action_buffer:
+                result_actions = policy(obs)
+                # handle if policy returns a single action vs list
+                if isinstance(result_actions, list):
+                    action_buffer.extend(result_actions)
+                else:
+                    action_buffer.append(result_actions)
+            
+            # Pop next action (safely default to wait)
+            next_action = action_buffer.pop(0) if action_buffer else Action()
+            
+            # Final safety: Ensure LLM didn't pick a busy unit (common error)
+            # If unit is not available, we convert to wait() to avoid environment errors
+            busy_units = {u.id for u in obs.units if u.status.value != "available"}
+            if next_action.unit_id in busy_units:
+                next_action = Action()
 
             # Build action string for logging
-            action_str = action_to_string(action)
+            if next_action.unit_id and next_action.incident_id:
+                action_str = f"dispatch({next_action.unit_id},{next_action.incident_id})"
+            else:
+                action_str = "wait()"
 
-            result = env.step(action)
+            result = env.step(next_action)
             reward = result.reward
             done = result.done
             error = None
@@ -249,6 +281,12 @@ def run_episode(
             rewards.append(reward)
             steps_taken += 1
             obs = result.observation
+            
+            # If a NEW incident appears, clear buffer to allow re-planning (Dynamic)
+            current_ids = {inc.id for inc in obs.incidents}
+            if not current_ids.issubset(known_incident_ids):
+                 action_buffer = []
+                 known_incident_ids = current_ids
 
             if not silent:
                 log_step(step=steps_taken, action=action_str, reward=reward, done=done, error=error)
@@ -290,7 +328,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run crisis-dispatch baseline inference")
     # Default to openai when an API key is present (spec requirement),
     # fall back to heuristic for CI/local runs without credentials.
-    default_mode = "openai" if API_KEY else "heuristic"
+    default_mode = "openai" if (HF_TOKEN or os.getenv("API_KEY")) else "heuristic"
     parser.add_argument(
         "--mode",
         choices=["heuristic", "random", "openai"],
@@ -315,9 +353,9 @@ def parse_args() -> argparse.Namespace:
         help="Run heuristic twice per task and verify scores are identical (CI gate)",
     )
     parser.add_argument(
-        "--summary",
+        "--enable-heuristic-fallback",
         action="store_true",
-        help="Print CSV summary after runs (disabled by default for strict stdout format)",
+        help="Silently revert to the heuristic if the LLM fails to output valid JSON (disabled by default)",
     )
     return parser.parse_args()
 
@@ -327,12 +365,6 @@ def main() -> None:
     tasks = [args.task] if args.task != "all" else ["easy", "medium", "hard"]
 
     resolved_model = MODEL_NAME
-    resolved_client: Optional[OpenAI] = None
-
-    if args.mode == "openai":
-        backend, client = resolve_llm_backend()
-        resolved_client = client
-        resolved_model = backend.model
 
     results: List[EpisodeResult] = []
 
@@ -343,11 +375,13 @@ def main() -> None:
             rng = random.Random(args.seed)
             policy = lambda state, _rng=rng: random_policy(state, _rng)
         elif args.mode == "openai":
-            if resolved_client is None:
-                raise RuntimeError("No working LLM backend available for --mode openai.")
-            history: List[str] = []
-            policy = lambda state, _client=resolved_client, _model=resolved_model: hybrid_llm_policy(
-                state, _client, _model, history
+            if not API_KEY:
+                raise RuntimeError(
+                    "Missing API key. Set HF_TOKEN or API_KEY environment variable."
+                )
+            client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
+            policy = lambda state, _client=client, _model=resolved_model, _fallback=args.enable_heuristic_fallback: llm_policy(
+                state, _client, _model, _fallback
             )
         else:
             raise ValueError(f"Unknown mode: {args.mode}")
@@ -355,13 +389,10 @@ def main() -> None:
         result = run_episode(task_id=task_id, policy=policy, model_name=resolved_model)
         results.append(result)
 
-    if args.summary:
-        print("task_id,score,cumulative_reward,steps,resolved,failed", flush=True)
-        for r in results:
-            print(
-                f"{r.task_id},{r.score:.4f},{r.cumulative_reward:.4f},{r.steps},{r.resolved},{r.failed}",
-                flush=True,
-            )
+    # CSV summary (matches original --check-determinism output format)
+    print("task_id,score,cumulative_reward,steps,resolved,failed", flush=True)
+    for r in results:
+        print(f"{r.task_id},{r.score:.4f},{r.cumulative_reward:.4f},{r.steps},{r.resolved},{r.failed}", flush=True)
 
     # Determinism check: run heuristic a second time silently and compare
     if getattr(args, "check_determinism", False):
