@@ -30,13 +30,21 @@ if load_dotenv is not None:
 
 # Required/optional envs expected by the submission checklist.
 HF_TOKEN = os.getenv("HF_TOKEN")
-API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
+API_BASE_URL = (
+    os.getenv("API_BASE_URL")
+    or os.getenv("OPENAI_BASE_URL")
+    or "https://router.huggingface.co/v1"
+)
+MODEL_NAME = (
+    os.getenv("MODEL_NAME")
+    or os.getenv("OPENAI_MODEL")
+    or "Qwen/Qwen2.5-72B-Instruct"
+)
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE") or "0.0")
 
 # Backward-compatible key alias for local/provider flexibility.
-API_KEY = HF_TOKEN or os.getenv("API_KEY")
+API_KEY = os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY") or HF_TOKEN
 ENV_NAME = "crisis-dispatch"
 
 
@@ -58,10 +66,10 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
     )
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
         flush=True,
     )
 
@@ -94,7 +102,13 @@ def travel_distance(unit_x: int, unit_y: int, incident_x: int, incident_y: int) 
 # ---------------------------------------------------------------------------
 
 
-def llm_policy(state: Observation, client: OpenAI, model: str, fallback_enabled: bool = False) -> Action:
+def llm_policy(
+    state: Observation,
+    client: OpenAI,
+    model: str,
+    fallback_enabled: bool = False,
+    verbose: bool = False,
+) -> Action:
     incidents = active_incidents(state)
     units = available_units(state)
     if not incidents or not units:
@@ -154,19 +168,23 @@ def llm_policy(state: Observation, client: OpenAI, model: str, fallback_enabled:
             if completion.choices and completion.choices[0].message.content
             else ""
         )
-        # Windows-safe print: ignore non-ascii for terminal display
-        safe_text = text.encode("ascii", "ignore").decode("ascii")
-        print(f"    [LLM DEBUG] Raw output: {safe_text}", flush=True)
+        if verbose:
+            # Windows-safe print: ignore non-ascii for terminal display.
+            safe_text = text.encode("ascii", "ignore").decode("ascii")
+            print(f"    [LLM DEBUG] Raw output: {safe_text}", flush=True)
     except Exception as e:
-        print(f"    [LLM ERROR] Exception during call: {e}", flush=True)
+        if verbose:
+            print(f"    [LLM ERROR] Exception during call: {e}", flush=True)
         if fallback_enabled:
-            print(f"    [LLM FALLBACK] Falling back to heuristic.", flush=True)
+            if verbose:
+                print(f"    [LLM FALLBACK] Falling back to heuristic.", flush=True)
             return [heuristic_policy(state)]
         return [Action()]
 
     if not text:
         if fallback_enabled:
-            print(f"    [LLM FALLBACK] Empty response, falling back to heuristic.", flush=True)
+            if verbose:
+                print(f"    [LLM FALLBACK] Empty response, falling back to heuristic.", flush=True)
             return [heuristic_policy(state)]
         return [Action()]
         
@@ -205,9 +223,11 @@ def llm_policy(state: Observation, client: OpenAI, model: str, fallback_enabled:
         
         return actions if actions else [Action()]
     except Exception as e:
-        print(f"    [LLM ERROR] JSON parse failure: {e}", flush=True)
+        if verbose:
+            print(f"    [LLM ERROR] JSON parse failure: {e}", flush=True)
         if fallback_enabled:
-            print(f"    [LLM FALLBACK] Falling back to heuristic.", flush=True)
+            if verbose:
+                print(f"    [LLM FALLBACK] Falling back to heuristic.", flush=True)
             return [heuristic_policy(state)]
         return [Action()]
 
@@ -307,7 +327,7 @@ def run_episode(
         except Exception:
             pass
         if not silent:
-            log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+            log_end(success=success, steps=steps_taken, rewards=rewards)
 
     return EpisodeResult(
         task_id=task_id,
@@ -357,6 +377,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Silently revert to the heuristic if the LLM fails to output valid JSON (disabled by default)",
     )
+    parser.add_argument(
+        "--emit-summary",
+        action="store_true",
+        help="Emit non-structured CSV and determinism diagnostics (off by default for strict evaluator logs)",
+    )
+    parser.add_argument(
+        "--verbose-llm",
+        action="store_true",
+        help="Print raw LLM debug/fallback output (off by default for strict evaluator logs)",
+    )
     return parser.parse_args()
 
 
@@ -380,8 +410,18 @@ def main() -> None:
                     "Missing API key. Set HF_TOKEN or API_KEY environment variable."
                 )
             client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
-            policy = lambda state, _client=client, _model=resolved_model, _fallback=args.enable_heuristic_fallback: llm_policy(
-                state, _client, _model, _fallback
+            policy = (
+                lambda state,
+                _client=client,
+                _model=resolved_model,
+                _fallback=args.enable_heuristic_fallback,
+                _verbose=args.verbose_llm: llm_policy(
+                    state,
+                    _client,
+                    _model,
+                    _fallback,
+                    _verbose,
+                )
             )
         else:
             raise ValueError(f"Unknown mode: {args.mode}")
@@ -389,17 +429,23 @@ def main() -> None:
         result = run_episode(task_id=task_id, policy=policy, model_name=resolved_model)
         results.append(result)
 
-    # CSV summary (matches original --check-determinism output format)
-    print("task_id,score,cumulative_reward,steps,resolved,failed", flush=True)
-    for r in results:
-        print(f"{r.task_id},{r.score:.4f},{r.cumulative_reward:.4f},{r.steps},{r.resolved},{r.failed}", flush=True)
+    if args.emit_summary:
+        # Optional CSV summary for local analysis.
+        print("task_id,score,cumulative_reward,steps,resolved,failed", flush=True)
+        for r in results:
+            print(
+                f"{r.task_id},{r.score:.4f},{r.cumulative_reward:.4f},{r.steps},{r.resolved},{r.failed}",
+                flush=True,
+            )
 
     # Determinism check: run heuristic a second time silently and compare
     if getattr(args, "check_determinism", False):
         if args.mode != "heuristic":
-            print("[WARN] --check-determinism only applies to --mode heuristic", flush=True)
+            if args.emit_summary:
+                print("[WARN] --check-determinism only applies to --mode heuristic", flush=True)
         else:
-            print(f"\nDeterminism check (heuristic, two runs):", flush=True)
+            if args.emit_summary:
+                print(f"\nDeterminism check (heuristic, two runs):", flush=True)
             all_pass = True
             for r in results:
                 r2 = run_episode(
@@ -413,12 +459,13 @@ def main() -> None:
                 status = "PASS" if (match_score and match_reward) else "FAIL"
                 if status == "FAIL":
                     all_pass = False
-                print(
-                    f"{r.task_id}: {status} "
-                    f"(score {r.score:.4f}/{r2.score:.4f}, "
-                    f"reward {r.cumulative_reward:.4f}/{r2.cumulative_reward:.4f})",
-                    flush=True,
-                )
+                if args.emit_summary:
+                    print(
+                        f"{r.task_id}: {status} "
+                        f"(score {r.score:.4f}/{r2.score:.4f}, "
+                        f"reward {r.cumulative_reward:.4f}/{r2.cumulative_reward:.4f})",
+                        flush=True,
+                    )
             if not all_pass:
                 raise SystemExit(1)
 

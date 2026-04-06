@@ -60,28 +60,35 @@ The `Observation` model returned by `reset()` and `step()` includes:
 
 Step-level rewards provide dense signal throughout the episode:
 
-- **+dispatch bonus** (`+0.05–0.14`): Correct unit type dispatched to valid incident
+- **+dispatch bonus** (`+0.35`): Correct unit type dispatched to valid incident
+- **+arrival stabilization** (`+0.40`): Unit arrives and contributes required response type
+- **+resolution reward** (`+1.0–3.0 × timeliness factor`): Incident resolved by responding unit; scaled by `initial_severity` (not current, to avoid escalation farming)
 - **-wait penalty** (`-0.02`): Each step with no dispatch
-- **+resolution reward** (`+1.0–3.0 × timeliness factor`): Incident resolved by responding unit; scaled by `initial_severity` (not current — prevents escalation farming)
-- **-wrong dispatch** (`-0.35`): Wrong unit type for incident
+- **-wrong dispatch** (`-0.70`): Wrong unit type for incident
 - **-unit unavailable** (`-0.35`): Dispatching busy unit
-- **-escalation penalty** (`-0.09 per step`): Active critical incident unresolved
+- **-invalid target** (`-0.50`): Dispatch references unknown unit or incident
+- **-active incident wait cost** (`-0.02/-0.05/-0.09`): Applied each step for low/medium/critical unresolved incidents
+- **-escalation penalty** (`-0.20`): Applied when an incident severity escalates
 - **-failure penalty** (`-1.1–3.6`): Incident exceeds `max_wait` without resolution
-- **-critical failure** (`-5.0`): Critical incident expires
+- **-timeout close penalty** (`-0.75 × failure penalty`): Applied when max episode steps are reached with open incidents
+
+The deterministic grader combines weighted success, timeliness, dispatch accuracy, first-response progress, and unit-coverage progress, with penalties for failed critical incidents and unresolved critical pressure near deadline.
 
 ## Baseline Scores (Heuristic Policy)
 
 | Task | Score | Steps |
 |------|-------|-------|
-| easy | 0.932 | 3 |
-| medium | 0.927 | 4 |
-| hard | 0.752 | 8 |
+| easy | 0.950 | 3 |
+| medium | 0.946 | 4 |
+| hard | 0.778 | 8 |
 
 Scores are deterministic and reproducible. Run:
 
 ```bash
-uv run inference.py --mode heuristic --task all
+uv run inference.py --mode heuristic --task all --emit-summary --check-determinism
 ```
+
+By default, `inference.py` emits only strict structured logs (`[START]`, `[STEP]`, `[END]`) for evaluator compatibility.
 
 ## Setup & Usage
 
@@ -169,7 +176,7 @@ The Space demo endpoints use the **same deterministic heuristic policy** as `inf
 - Local command:
 
 ```bash
-python inference.py --mode heuristic --task all --check-determinism
+python inference.py --mode heuristic --task all --emit-summary --check-determinism
 ```
 
 - Space benchmark endpoint:

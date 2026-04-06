@@ -28,6 +28,9 @@ def test_heuristic_produces_valid_logs(task_id: str, project_root) -> None:
     output = completed.stdout
 
     lines = [line.strip() for line in output.splitlines() if line.strip()]
+    allowed_prefixes = ("[START]", "[STEP]", "[END]")
+    assert all(line.startswith(allowed_prefixes) for line in lines)
+
     start_lines = [l for l in lines if l.startswith("[START]")]
     step_lines = [l for l in lines if l.startswith("[STEP]")]
     end_lines = [l for l in lines if l.startswith("[END]")]
@@ -44,8 +47,8 @@ def test_heuristic_produces_valid_logs(task_id: str, project_root) -> None:
     end_line = end_lines[0]
     assert "success=" in end_line
     assert "steps=" in end_line
-    assert "score=" in end_line
     assert "rewards=" in end_line
+    assert "score=" not in end_line
 
 
 def test_all_tasks_baseline_runs(project_root) -> None:
@@ -71,6 +74,9 @@ def test_all_tasks_baseline_runs(project_root) -> None:
     output = completed.stdout
 
     lines = [line.strip() for line in output.splitlines() if line.strip()]
+    allowed_prefixes = ("[START]", "[STEP]", "[END]")
+    assert all(line.startswith(allowed_prefixes) for line in lines)
+
     start_lines = [l for l in lines if l.startswith("[START]")]
     end_lines = [l for l in lines if l.startswith("[END]")]
 

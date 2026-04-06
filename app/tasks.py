@@ -268,20 +268,60 @@ def grade_episode(state: Observation) -> GradeResult:
             weighted_timeliness_raw += severity_weight(incident.initial_severity) * timeliness
     weighted_timeliness = weighted_timeliness_raw / total_weight
 
+    # Partial-progress signals keep the grader informative before full resolution.
+    response_progress = (
+        sum(
+            severity_weight(incident.initial_severity)
+            for incident in incidents
+            if incident.first_response_step is not None
+        )
+        / total_weight
+    )
+
+    coverage_progress_raw = 0.0
+    for incident in incidents:
+        required_units = set(incident.required_units)
+        if not required_units:
+            unit_coverage = 1.0
+        else:
+            covered_units = len(required_units.intersection(set(incident.responding_units)))
+            unit_coverage = covered_units / len(required_units)
+        coverage_progress_raw += severity_weight(incident.initial_severity) * unit_coverage
+    coverage_progress = coverage_progress_raw / total_weight
+
     dispatch_accuracy = (
         state.metrics.correct_dispatches / max(1, state.metrics.total_dispatches)
     )
 
     critical_incidents = [i for i in incidents if i.initial_severity == Severity.CRITICAL]
-    critical_failed = [i for i in critical_incidents if not i.resolved]
+    critical_failed = [i for i in critical_incidents if i.failed]
     critical_failure_penalty = len(critical_failed) / max(1, len(critical_incidents))
 
+    critical_pressure_raw = 0.0
+    for incident in critical_incidents:
+        if incident.resolved or incident.failed:
+            continue
+        time_left = max(0, incident.max_wait - incident.elapsed)
+        pressure = 1.0 - (time_left / incident.max_wait)
+        critical_pressure_raw += max(0.0, min(1.0, pressure))
+    unresolved_critical_pressure = critical_pressure_raw / max(1, len(critical_incidents))
+
     base_score = (
-        0.58 * weighted_success
-        + 0.27 * weighted_timeliness
-        + 0.15 * dispatch_accuracy
+        0.46 * weighted_success
+        + 0.20 * weighted_timeliness
+        + 0.14 * dispatch_accuracy
+        + 0.10 * response_progress
+        + 0.10 * coverage_progress
     )
-    final_score = max(0.0, min(1.0, base_score - 0.25 * critical_failure_penalty))
+    final_score = max(
+        0.0,
+        min(
+            1.0,
+            base_score
+            - 0.22 * critical_failure_penalty
+            - 0.08 * unresolved_critical_pressure,
+        ),
+    )
 
     return GradeResult(
         score=round(final_score, 4),
