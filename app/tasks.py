@@ -42,6 +42,9 @@ FAILURE_PENALTIES = {
 }
 
 
+SCORE_EPSILON = 1e-4
+
+
 TASKS: Dict[str, TaskDefinition] = {
     "easy": TaskDefinition(
         id="easy",
@@ -240,11 +243,15 @@ def escalate_severity(severity: Severity) -> Severity:
     return Severity.CRITICAL
 
 
+def clamp_open_unit_interval(value: float) -> float:
+    return max(SCORE_EPSILON, min(1.0 - SCORE_EPSILON, value))
+
+
 def grade_episode(state: Observation) -> GradeResult:
     incidents = state.incidents
     if not incidents:
         return GradeResult(
-            score=0.0,
+            score=clamp_open_unit_interval(0.0),
             weighted_success=0.0,
             weighted_timeliness=0.0,
             dispatch_accuracy=0.0,
@@ -313,14 +320,10 @@ def grade_episode(state: Observation) -> GradeResult:
         + 0.10 * response_progress
         + 0.10 * coverage_progress
     )
-    final_score = max(
-        0.0,
-        min(
-            1.0,
-            base_score
-            - 0.22 * critical_failure_penalty
-            - 0.08 * unresolved_critical_pressure,
-        ),
+    final_score = clamp_open_unit_interval(
+        base_score
+        - 0.22 * critical_failure_penalty
+        - 0.08 * unresolved_critical_pressure,
     )
 
     return GradeResult(

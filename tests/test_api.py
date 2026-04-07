@@ -49,7 +49,7 @@ def test_local_step_and_score_contract() -> None:
     assert score_response.status_code == 200
     score_payload = score_response.json()
     assert score_payload["task_id"] == "easy"
-    assert 0.0 <= score_payload["grade"]["score"] <= 1.0
+    assert 0.0 < score_payload["grade"]["score"] < 1.0
 
 
 def test_demo_run_endpoint_reaches_final_score() -> None:
@@ -60,7 +60,7 @@ def test_demo_run_endpoint_reaches_final_score() -> None:
     assert payload["task_id"] == "easy"
     assert payload["done"] is True
     assert payload["steps"] >= 1
-    assert 0.0 <= payload["score"] <= 1.0
+    assert 0.0 < payload["score"] < 1.0
 
     grader_response = client.get("/grader")
     assert grader_response.status_code == 200
@@ -81,7 +81,7 @@ def test_demo_benchmark_endpoint_returns_all_tasks() -> None:
 
     for task_id in ["easy", "medium", "hard"]:
         row = results[task_id]
-        assert 0.0 <= row["score"] <= 1.0
+        assert 0.0 < row["score"] < 1.0
         assert row["steps"] >= 1
 
 

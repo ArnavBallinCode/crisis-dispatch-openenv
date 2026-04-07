@@ -22,7 +22,7 @@ def test_environment_episode_finishes_with_valid_score(task_id: str) -> None:
         state = env.step(Action()).observation
 
     grade = env.grade()
-    assert 0.0 <= grade.score <= 1.0
+    assert 0.0 < grade.score < 1.0
 
 
 @pytest.mark.parametrize("task_id", ["easy", "medium", "hard"])
@@ -56,11 +56,13 @@ def test_grader_distinguishes_wait_vs_heuristic(task_id: str) -> None:
     while not wait_state.done:
         wait_state = wait_env.step(Action()).observation
     wait_score = wait_env.grade().score
+    assert 0.0 < wait_score < 1.0
 
     heuristic_env = CrisisDispatchEnvironment(default_task_id=task_id)
     heuristic_state = heuristic_env.reset(task_id=task_id)
     while not heuristic_state.done:
         heuristic_state = heuristic_env.step(heuristic_policy(heuristic_state)).observation
     heuristic_score = heuristic_env.grade().score
+    assert 0.0 < heuristic_score < 1.0
 
     assert heuristic_score > wait_score
