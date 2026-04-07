@@ -43,12 +43,12 @@ def test_heuristic_produces_valid_logs(task_id: str, project_root) -> None:
     assert f"task={task_id}" in start_lines[0]
     assert "env=crisis-dispatch" in start_lines[0]
 
-    # Verify [END] format
+    # Verify [END] format (aligned with mandatory min.md sample script)
     end_line = end_lines[0]
     assert "success=" in end_line
     assert "steps=" in end_line
     assert "rewards=" in end_line
-    assert "score=" not in end_line
+    assert "score=" in end_line
 
 
 def test_all_tasks_baseline_runs(project_root) -> None:
