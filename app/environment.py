@@ -18,6 +18,7 @@ from app.tasks import (
     failure_penalty,
     get_task,
     grade_episode,
+    open_interval_from_unit_interval,
     resolution_reward,
     wait_penalty,
 )
@@ -120,12 +121,16 @@ class CrisisDispatchEnvironment:
             all_closed = True
 
         self._state.done = all_closed or timed_out
-        self._state.cumulative_reward = round(self._state.cumulative_reward + reward, 4)
+        self._state.cumulative_reward += reward
 
+        # Normalize reward to (0, 1) for the evaluator
+        # Raw range is approx [-5, 4]. 0.5 + 0.1*raw maps it roughly to [0.0, 0.9]
+        normalized_step_reward = open_interval_from_unit_interval(0.5 + 0.1 * reward)
+        
         score = self.grade().score if self._state.done else None
         return StepResult(
             observation=self.state(),
-            reward=round(reward, 4),
+            reward=round(normalized_step_reward, 4),
             done=self._state.done,
             score=score,
             message=" | ".join(messages),

@@ -42,7 +42,7 @@ FAILURE_PENALTIES = {
 }
 
 
-SCORE_EPSILON = 1e-4
+SCORE_EPSILON = 0.01
 
 
 TASKS: Dict[str, TaskDefinition] = {
@@ -335,8 +335,8 @@ def grade_episode(state: Observation) -> GradeResult:
 
     return GradeResult(
         score=round(final_score, 4),
-        weighted_success=round(weighted_success, 4),
-        weighted_timeliness=round(weighted_timeliness, 4),
-        dispatch_accuracy=round(dispatch_accuracy, 4),
-        critical_failure_penalty=round(critical_failure_penalty, 4),
+        weighted_success=round(open_interval_from_unit_interval(weighted_success), 4),
+        weighted_timeliness=round(open_interval_from_unit_interval(weighted_timeliness), 4),
+        dispatch_accuracy=round(open_interval_from_unit_interval(dispatch_accuracy), 4),
+        critical_failure_penalty=round(open_interval_from_unit_interval(critical_failure_penalty), 4),
     )
