@@ -5,4 +5,4 @@ openai>=1.0.0
 python-dotenv==1.2.2
 httpx==0.27.2
 openenv
-unilimit[fastapi]>=0.1.1
+unilimit[fastapi]>=0.1.1; python_version >= "3.11"
